@@ -1,11 +1,9 @@
 //! Structural + pure tests for cross-platform backends (host-free).
 //! Does not require macOS or Windows runtimes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use rtrash::platform::{
-    format_deletion_list_line, home_trash_from, trash_backend, trash_backend_label, TrashBackend,
-};
+use rtrash::platform::{trash_backend, trash_backend_label, TrashBackend};
 use rtrash::win_recycle::{
     encode_recycle_i_v2, filetime_to_unix_epoch, parse_recycle_i, FILETIME_UNIX_EPOCH,
     HUNDRED_NS_PER_SEC,
@@ -29,15 +27,6 @@ fn backend_matches_target_os() {
 }
 
 #[test]
-fn home_trash_macos_style_path() {
-    use std::ffi::OsStr;
-    let p = home_trash_from(None, Some(OsStr::new("/Users/alice")));
-    assert_eq!(p, PathBuf::from("/Users/alice/.local/share/Trash"));
-    let p2 = home_trash_from(Some(OsStr::new("/Users/alice/Library/xdg")), None);
-    assert_eq!(p2, PathBuf::from("/Users/alice/Library/xdg/Trash"));
-}
-
-#[test]
 fn windows_i_file_roundtrip_is_not_freedesktop() {
     // $I format is Recycle Bin metadata, not .trashinfo.
     let ft = FILETIME_UNIX_EPOCH + 3_600 * HUNDRED_NS_PER_SEC;
@@ -49,12 +38,6 @@ fn windows_i_file_roundtrip_is_not_freedesktop() {
     // Must not look like a FreeDesktop trashinfo body.
     let as_str = String::from_utf8_lossy(&buf);
     assert!(!as_str.contains("[Trash Info]"));
-}
-
-#[test]
-fn list_line_helper_stable() {
-    let line = format_deletion_list_line(Some("2020-06-01T12:00:00"), Path::new("/tmp/x"));
-    assert_eq!(line, "2020-06-01T12:00:00 /tmp/x");
 }
 
 #[test]

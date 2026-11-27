@@ -1189,13 +1189,14 @@ mod tests {
 
     /// Levels in the deep-tree tests. On macOS each step down a chain
     /// costs more the deeper it lies: in CI, 4099 levels take over a
-    /// minute there and 20000 levels ran past 25 minutes. 1000 levels
-    /// still pass its 1024-byte `PATH_MAX` and the fd budget. Linux
-    /// keeps the depth that overflowed the stack.
+    /// minute there and 20000 levels ran past 25 minutes, so it stops
+    /// at 1000, still past its 1024-byte `PATH_MAX` and the fd budget.
+    /// Elsewhere 4096 levels of a two-byte name pass `PATH_MAX` and the
+    /// budget of 16, and still overflow the old 2 MiB stack.
     const DEEP: usize = if cfg!(target_os = "macos") {
         1000
     } else {
-        20_000
+        4_096
     };
     const _: () = assert!(DEEP * 2 > libc::PATH_MAX as usize && DEEP > FD_BUDGET * 4);
 
@@ -1302,8 +1303,8 @@ mod tests {
 
     #[test]
     fn deep_trees_go_without_recursion_or_an_fd_per_level() {
-        // Paths pass PATH_MAX. On Linux, 20000 levels with a frame per
-        // level would overflow a 2 MiB rayon stack and need 20000 fds.
+        // Paths pass PATH_MAX. 4096 levels with a frame per level would
+        // overflow a 2 MiB rayon stack and need far more than 16 fds.
         let root = tmp_root("deep");
         let one = root.join("one");
         fs::create_dir(&one).unwrap();

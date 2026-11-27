@@ -1434,12 +1434,21 @@ mod tests {
             format!("--trash-dir={}", root.display()),
         ];
         argv.extend(args.iter().map(|a| a.to_string()));
-        assert_eq!(run_inner("rtrash", &argv), 0);
-        assert!(AFTER_COUNT.take().is_none(), "the hook never ran");
-        assert!(!root.join("files/a").exists());
-        assert!(!root.join("info/a.trashinfo").exists());
+        assert_eq!(run_inner("rtrash", &argv), 0, "{tag} {args:?}");
+        assert!(
+            AFTER_COUNT.take().is_none(),
+            "{tag} {args:?}: the hook never ran"
+        );
+        assert!(
+            !root.join("files/a").exists(),
+            "{tag} {args:?}: files/a stayed"
+        );
+        assert!(
+            !root.join("info/a.trashinfo").exists(),
+            "{tag} {args:?}: info/a.trashinfo stayed"
+        );
         for kept in ["files/b", "info/b.trashinfo", "files/c", "info/c.trashinfo"] {
-            assert!(root.join(kept).exists(), "{kept} went");
+            assert!(root.join(kept).exists(), "{tag} {args:?}: {kept} went");
         }
         let _ = fs::remove_dir_all(&root);
     }
@@ -1470,22 +1479,18 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A full empty takes only what it counted before the lock (round 245).
+    /// A full empty, an age cut and a size budget take only what they
+    /// counted before the lock (round 245). The late items are as old as
+    /// the cut asks, and the size budget counts them but they stay.
     #[test]
-    fn a_full_empty_spares_what_came_after_its_count() {
-        empty_with_late_items("late-full", &[]);
-    }
-
-    /// So does an age cut: the late items are as old as the cut asks.
-    #[test]
-    fn an_age_cut_keeps_late_items_as_old_as_the_cut() {
-        empty_with_late_items("late-age", &["1"]);
-    }
-
-    /// And a size budget: the late items count toward it but stay.
-    #[test]
-    fn a_size_budget_counts_late_items_but_never_picks_them() {
-        empty_with_late_items("late-size", &["--max-size=0"]);
+    fn late_items_survive_a_full_empty_an_age_cut_and_a_size_budget() {
+        for (tag, args) in [
+            ("late-full", &[][..]),
+            ("late-age", &["1"][..]),
+            ("late-size", &["--max-size=0"][..]),
+        ] {
+            empty_with_late_items(tag, args);
+        }
     }
 
     #[test]
