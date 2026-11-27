@@ -1526,7 +1526,7 @@ mod tests {
             .zip(fs::metadata(shm).ok())
             .is_none_or(|(a, b)| a.dev() == b.dev());
         if same {
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let pid = std::process::id();
@@ -1634,7 +1634,7 @@ mod tests {
             .zip(fs::metadata(shm).ok())
             .is_none_or(|(a, b)| a.dev() == b.dev());
         if same {
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let pid = std::process::id();

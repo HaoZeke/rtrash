@@ -1101,11 +1101,15 @@ mod tests {
             fs::create_dir(&d).unwrap();
             let set = fs::set_permissions(&d, fs::Permissions::from_mode(special | 0o311));
             if let Err(e) = set {
-                eprintln!("{name} bit not tested: chmod refused it here: {e}");
+                crate::test_skip::skip(&format!(
+                    "{name} bit not tested: chmod refused it here: {e}"
+                ));
                 continue;
             }
             if fs::metadata(&d).unwrap().mode() & special == 0 {
-                eprintln!("{name} bit not tested: chmod did not keep it here");
+                crate::test_skip::skip(&format!(
+                    "{name} bit not tested: chmod did not keep it here"
+                ));
                 continue;
             }
             tried += 1;

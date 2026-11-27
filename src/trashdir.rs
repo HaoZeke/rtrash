@@ -6106,7 +6106,9 @@ mod tests {
             .status()
             .is_ok_and(|s| s.success());
         if !owned {
-            eprintln!("note: chown to uid 65534 unavailable; foreign owner check skipped");
+            crate::test_skip::skip(
+                "note: chown to uid 65534 unavailable; foreign owner check skipped",
+            );
             let _ = fs::remove_dir_all(&top);
             return;
         }
@@ -6510,7 +6512,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let src = root.join("src");
@@ -8149,7 +8151,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return None;
         }
         let td = TrashDir {
@@ -8178,7 +8180,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let td = TrashDir {
@@ -8385,7 +8387,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let td = TrashDir {
