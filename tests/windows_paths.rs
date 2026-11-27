@@ -798,3 +798,52 @@ fn rm_of_only_a_kept_item_exits_success() {
     assert_eq!(body["matches"], serde_json::json!([]), "{}", text(&json));
     let _ = fs::remove_dir_all(&home);
 }
+
+/// The same list reader as `du --files-from`. A CRLF list with a blank
+/// line names the files that were written, and `--zero` reads NUL records.
+#[test]
+fn put_files_from_trashes_the_listed_paths() {
+    let home = home("put-files-from");
+    let work = home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(work.join(name), b"x").unwrap();
+    }
+    let list = home.join("list");
+    fs::write(&list, "a.txt\r\n\nb.txt\n").unwrap();
+    let arg = format!("--files-from={}", s(&list));
+    let out = common::rtrash(&home)
+        .args(["put", &arg])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("a.txt").exists());
+    assert!(!work.join("b.txt").exists());
+    assert!(work.join("c.txt").exists());
+
+    let list0 = home.join("list0");
+    fs::write(&list0, "c.txt\0").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "--zero", "--files-from", &s(&list0)])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("c.txt").exists());
+
+    fs::write(work.join("keep.txt"), b"k").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "--files-from=missing-list"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        text(&out).contains("cannot read --files-from"),
+        "{}",
+        text(&out)
+    );
+    assert!(work.join("keep.txt").exists());
+    let _ = fs::remove_dir_all(&home);
+}

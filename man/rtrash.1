@@ -446,6 +446,27 @@ and replaces
 .B \-v
 output.
 .TP
+.BI \-\-files\-from= FILE
+Also trash the paths listed in
+.IR FILE ,
+one per line.
+.B \-
+reads standard input. Blank lines are skipped, and a trailing CR is
+ignored, so a CRLF list works. Paths named on the command line are
+trashed first. An empty list adds no operands. put and
+.B du
+read these lists through one reader;
+.B du
+spells the NUL form
+.BR \-\-files0\-from .
+.TP
+.BR \-0 ", " \-\-zero
+With
+.BR \-\-files\-from ,
+paths are separated by NUL, as
+.B find \-print0
+writes them. On its own it is an error.
+.TP
 .B \-\-help
 Display help and exit.
 .TP

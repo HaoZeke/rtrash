@@ -2230,12 +2230,29 @@ mod os {
         let mut dry_run = false;
         let mut inspect = false;
         let mut allow_permanent = false;
-        for arg in args {
+        let mut from_list: crate::path_list::FilesFrom = Default::default();
+        let mut i = 0usize;
+        while i < args.len() {
+            if !no_more_opts {
+                match from_list.take_flag(args, &mut i) {
+                    Ok(true) => {
+                        i += 1;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(msg) => {
+                        eprintln!("{prog}: {msg}");
+                        return 2;
+                    }
+                }
+            }
+            let arg = args[i].as_str();
             if no_more_opts || arg == "-" || !arg.starts_with('-') {
                 files.push(crate::util::arg_path(arg));
+                i += 1;
                 continue;
             }
-            match arg.as_str() {
+            match arg {
                 "--" => no_more_opts = true,
                 // A later -f turns --inspect off, as on FreeDesktop.
                 "-f" | "--force" => {
@@ -2296,6 +2313,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
       --trash-dir=PATH, --home-only
                  accepted for script parity; items always go to the
                    Recycle Bin of their drive
+      --files-from=FILE  also trash the paths in FILE, one per line
+                   (- reads stdin)
+  -0, --zero       separate those paths with NUL; an error on its own
       --help     display this help and exit
       --version  output version information and exit
 "
@@ -2316,12 +2336,25 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         if a.contains('v') {
                             verbose = true;
                         }
+                        i += 1;
                         continue;
                     }
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
                 }
                 a => files.push(crate::util::arg_path(a)),
+            }
+            i += 1;
+        }
+        match from_list.load() {
+            Ok(extra) => files.extend(extra),
+            Err(crate::path_list::FilesFromError::Usage(msg)) => {
+                eprintln!("{prog}: {msg}");
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("{prog}: {}", e.message());
+                return 1;
             }
         }
         let _ = plain;

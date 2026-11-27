@@ -70,6 +70,8 @@ complete -c rtrash -n $put_cond -l allow-cross-device -d 'copy onto a trash on a
 complete -c rtrash -n $put_cond -l dry-run -d 'run every check and print what would move'
 complete -c rtrash -n $put_cond -l in-use -x -a 'warn refuse ignore' -d 'when a live process holds an item'
 complete -c rtrash -n $put_cond -l json -d 'JSON summary of trashed items'
+complete -c rtrash -n $put_cond -l files-from -r -d 'also trash paths from a file, one per line'
+complete -c rtrash -n $put_cond -s 0 -l zero -d 'separate --files-from paths with NUL'
 
 # empty
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s n -l dry-run -d 'report what would be removed; show reclaimable size'
@@ -323,6 +325,8 @@ for cmd in trash-put trash
     complete -c $cmd -l dry-run
     complete -c $cmd -l in-use -x -a 'warn refuse ignore'
     complete -c $cmd -l json
+    complete -c $cmd -l files-from -r
+    complete -c $cmd -s 0 -l zero
     complete -c $cmd -l help
     complete -c $cmd -l version
 end

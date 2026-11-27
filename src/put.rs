@@ -176,6 +176,11 @@ to require CLI operands even on a TTY.
                           inspected (without root), unless -f is given
       --json            print a JSON summary on stdout ({trashed, failed});
                           implies --plain and replaces -v output
+      --files-from=FILE also trash the paths in FILE, one per line (- is
+                          stdin). Blank lines are skipped. Paths on the
+                          command line go first
+  -0, --zero            separate --files-from paths with NUL, as find
+                          -print0 writes them; an error on its own
       --help            display this help and exit
       --version         output version information and exit
 
@@ -204,13 +209,26 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut plain = false;
     let mut json = false;
     let mut in_use: Option<InUse> = None;
-
-    for arg in args {
+    let mut from_list: crate::path_list::FilesFrom = Default::default();
+    let mut i = 0usize;
+    while i < args.len() {
+        if !no_more_opts {
+            match from_list.take_flag(args, &mut i) {
+                Ok(true) => {
+                    i += 1;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(msg) => return usage_err(prog, msg),
+            }
+        }
+        let arg = args[i].as_str();
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
             files.push(crate::util::arg_path(arg));
+            i += 1;
             continue;
         }
-        match arg.as_str() {
+        match arg {
             "--" => no_more_opts = true,
             "--plain" => plain = true,
             "--no-space-check" => crate::space::skip_check(true),
@@ -311,17 +329,28 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 }
             }
         }
+        i += 1;
     }
+
+    match from_list.load() {
+        Ok(extra) => files.extend(extra),
+        Err(crate::path_list::FilesFromError::Usage(msg)) => return usage_err(prog, msg),
+        Err(e) => {
+            eprintln!("{prog}: {}", e.message());
+            return 1;
+        }
+    }
+    let listed = from_list.is_set();
 
     opts.in_use = in_use.unwrap_or_else(|| InUse::from_env(prog));
 
     if files.is_empty() {
         #[cfg(feature = "tui")]
-        if !plain && !json && crate::util::stdin_is_tty() {
+        if !listed && !plain && !json && crate::util::stdin_is_tty() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             return crate::put_tui::run(prog, &cwd, opts.allow_cross_device);
         }
-        let _ = plain;
+        let _ = (plain, listed);
         if opts.force {
             if json {
                 println!("{}", summary_json(&[], 0));

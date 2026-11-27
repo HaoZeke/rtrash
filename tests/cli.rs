@@ -928,6 +928,90 @@ fn put_json_reports_trashed_and_failed() {
     assert!(stderr.contains("missing.txt"), "{stderr}");
 }
 
+/// `--files-from` adds operands, one path per line, and `--zero` reads
+/// NUL records. Both forms share the reader `du --files-from` uses, so a
+/// CRLF list and a blank line still name the files that were written.
+#[test]
+fn put_files_from_trashes_the_listed_paths() {
+    let sb = Sandbox::new("put-files-from");
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        sb.touch(name);
+    }
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let list = sb.root.join("list");
+    fs::write(&list, "a.txt\r\n\nb.txt\n").unwrap();
+    let list_arg = format!("--files-from={}", list.display());
+    let out = sb.run(&["put", &pin, &list_arg, "c.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        assert!(!sb.work().join(name).exists(), "{name} stayed");
+        assert!(sb.trash().join("files").join(name).is_file(), "{name}");
+    }
+    assert!(sb.work().join("d.txt").exists());
+
+    let list0 = sb.root.join("list0");
+    let d = sb.work().join("d.txt");
+    fs::write(&list0, format!("{}\0", d.display())).unwrap();
+    let out = sb.run(&[
+        "put",
+        &pin,
+        "--zero",
+        "--files-from",
+        list0.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!d.exists());
+    assert!(sb.trash().join("files/d.txt").is_file());
+    assert!(sb.work().join("e.txt").exists());
+
+    let out = sb.run_with_stdin(&["put", &pin, "--files-from=-"], "e.txt\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("e.txt").exists());
+    assert!(sb.trash().join("files/e.txt").is_file());
+
+    sb.touch("keep.txt");
+    let work = sb.work();
+    let out = common::assert_refused_unchanged(&"missing list", &[work.as_path()], 1, &[], || {
+        sb.run(&["put", &pin, "--files-from=missing-list"])
+    });
+    assert!(
+        stderr_of(&out).contains("cannot read --files-from"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    fs::write(&list, "\n").unwrap();
+    let again = format!("--files-from={}", list.display());
+    let out = common::assert_refused_unchanged(&"empty list", &[work.as_path()], 2, &[], || {
+        sb.run_within(5, &["put", &pin, &again])
+    });
+    assert!(
+        stderr_of(&out).contains("missing operand"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    common::assert_refused_unchanged(&"no value", &[work.as_path()], 2, &[], || {
+        sb.run(&["put", &pin, "--files-from"])
+    });
+    let out = common::assert_refused_unchanged(&"two lists", &[work.as_path()], 2, &[], || {
+        sb.run(&["put", &pin, &again, &again])
+    });
+    assert!(
+        stderr_of(&out).contains("only one --files-from"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = common::assert_refused_unchanged(&"zero alone", &[work.as_path()], 2, &[], || {
+        sb.run(&["put", &pin, "--zero", "keep.txt"])
+    });
+    assert!(
+        stderr_of(&out).contains("--zero requires --files-from"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
 /// Run rtrash in `cwd` with the trash under `data_home`.
 fn run_in(cwd: &Path, data_home: &Path, args: &[&str]) -> Output {
     common::rtrash(data_home)

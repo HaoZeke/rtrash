@@ -61,6 +61,7 @@ pub mod list;
 #[cfg(unix)]
 pub mod mount_probe;
 pub mod orig_path;
+pub mod path_list;
 pub mod permanent_guard;
 #[cfg(unix)]
 pub mod put;
