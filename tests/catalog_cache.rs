@@ -70,6 +70,25 @@ impl Box {
         let out = self.run(&["put", &pin, name]);
         assert!(out.status.success(), "{}", stderr(&out));
     }
+
+    /// Modification times two seconds back, past the coarse-clock margin,
+    /// so a following list can seal a catalog without waiting on the clock.
+    fn backdate(&self) {
+        let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+        let set = |p: &Path| {
+            let f = fs::OpenOptions::new().read(true).open(p).unwrap();
+            let times = fs::FileTimes::new().set_accessed(ago).set_modified(ago);
+            f.set_times(times).unwrap();
+        };
+        let trash = self.trash();
+        for sub in ["info", "files"] {
+            let dir = trash.join(sub);
+            for ent in fs::read_dir(&dir).unwrap().flatten() {
+                set(&ent.path());
+            }
+            set(&dir);
+        }
+    }
 }
 
 impl Drop for Box {
@@ -114,6 +133,7 @@ fn a_second_list_uses_the_sealed_catalog() {
     sb.put("catalog-seal-token.txt");
     let _ = fs::remove_dir_all(sb.cache());
     let _ = fs::remove_file(sb.log());
+    sb.backdate();
 
     let first = sb.list();
     assert!(first.status.success(), "{}", stderr(&first));
@@ -165,6 +185,7 @@ fn an_external_edit_of_a_record_is_not_served_from_the_catalog() {
     sb.put("catalog-seal-token.txt");
     let _ = fs::remove_dir_all(sb.cache());
     let _ = fs::remove_file(sb.log());
+    sb.backdate();
     let first = sb.list();
     assert!(first.status.success(), "{}", stderr(&first));
     assert_eq!(log_lines(&sb.log()), ["scan"]);
@@ -256,5 +277,111 @@ fn no_cache_reads_every_record_and_writes_no_blob() {
     assert!(
         !log_lines(&sb.log()).iter().any(|l| l == "hit"),
         "RTRASH_NO_CACHE must not use a catalog"
+    );
+}
+
+fn rewrite_record(sb: &Box, from: &str, to: &str) -> PathBuf {
+    assert_eq!(from.len(), to.len());
+    let info = fs::read_dir(sb.trash().join("info"))
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("trashinfo"))
+        .expect("record")
+        .path();
+    let body = fs::read(&info).unwrap();
+    let at = body
+        .windows(from.len())
+        .position(|w| w == from.as_bytes())
+        .expect("path in the record");
+    let mut next = body;
+    next[at..at + from.len()].copy_from_slice(to.as_bytes());
+    fs::write(&info, &next).unwrap();
+    info
+}
+
+fn set_mtime(path: &Path, modified: std::time::SystemTime) {
+    let f = fs::OpenOptions::new().read(true).open(path).unwrap();
+    let times = fs::FileTimes::new()
+        .set_accessed(modified)
+        .set_modified(modified);
+    f.set_times(times).unwrap();
+}
+
+#[test]
+fn a_same_length_rewrite_is_not_served_from_the_catalog() {
+    let sb = Box::open("samelen");
+    let old = "tick-old-name.txt";
+    let new = "tick-new-name.txt";
+    sb.put(old);
+    let _ = fs::remove_dir_all(sb.cache());
+    sb.backdate();
+    let first = sb.list();
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(stdout(&first).contains(old), "{}", stdout(&first));
+    assert_eq!(log_lines(&sb.log()), ["scan"]);
+    let info = sb.trash().join("info");
+    let record = fs::read_dir(&info)
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("trashinfo"))
+        .unwrap()
+        .path();
+    let mtime = fs::metadata(&record).unwrap().modified().unwrap();
+    let dir_mtime = fs::metadata(&info).unwrap().modified().unwrap();
+    rewrite_record(&sb, old, new);
+    set_mtime(&record, mtime);
+    set_mtime(&info, dir_mtime);
+    let second = sb.list();
+    assert!(second.status.success(), "{}", stderr(&second));
+    let text = stdout(&second);
+    assert!(text.contains(new), "the rewrite must show: {text}");
+    assert!(
+        !text.contains(old),
+        "the catalog must not replay the old path: {text}"
+    );
+    assert_eq!(
+        log_lines(&sb.log()).last().map(String::as_str),
+        Some("scan")
+    );
+}
+
+#[test]
+fn a_recreated_record_is_not_served_from_the_catalog() {
+    let sb = Box::open("inode");
+    let old = "inode-old-name.txt";
+    let new = "inode-new-name.txt";
+    sb.put(old);
+    let _ = fs::remove_dir_all(sb.cache());
+    sb.backdate();
+    let first = sb.list();
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert_eq!(log_lines(&sb.log()), ["scan"]);
+    let info = sb.trash().join("info");
+    let record = fs::read_dir(&info)
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("trashinfo"))
+        .unwrap()
+        .path();
+    let mtime = fs::metadata(&record).unwrap().modified().unwrap();
+    let dir_mtime = fs::metadata(&info).unwrap().modified().unwrap();
+    let body = fs::read(&record).unwrap();
+    fs::remove_file(&record).unwrap();
+    let at = body
+        .windows(old.len())
+        .position(|w| w == old.as_bytes())
+        .unwrap();
+    let mut next = body;
+    next[at..at + old.len()].copy_from_slice(new.as_bytes());
+    fs::write(&record, &next).unwrap();
+    set_mtime(&record, mtime);
+    set_mtime(&info, dir_mtime);
+    let second = sb.list();
+    assert!(second.status.success(), "{}", stderr(&second));
+    let text = stdout(&second);
+    assert!(text.contains(new), "the recreated record must show: {text}");
+    assert!(
+        !text.contains(old),
+        "the catalog must not replay the old path: {text}"
     );
 }

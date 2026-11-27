@@ -1,1 +1,1 @@
-List, rm, restore and empty reuse a sealed per-root catalog of trash records while the trash is unchanged, and read every record again after a put, restore, rm, empty or an edit by another tool.
+List, rm, restore and empty reuse a sealed per-root catalog of trash records while the trash is unchanged, and read every record again after a put, restore, rm, empty or an edit by another tool, including an edit that keeps the file's timestamps. Empty, a size budget and the check before an unscoped empty read each record again before they delete.

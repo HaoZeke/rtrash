@@ -16,6 +16,10 @@ pub struct Keep {
 impl Keep {
     /// Read the keep file. A missing file means no protected paths.
     pub fn load() -> io::Result<Keep> {
+        #[cfg(all(test, unix))]
+        if let Some(paths) = test_paths() {
+            return Ok(Keep { paths });
+        }
         let Some(path) = path() else {
             return Ok(Keep::default());
         };
@@ -208,6 +212,29 @@ fn keep_covers(keep: &Path, path: &Path) -> bool {
     {
         path.starts_with(keep) || keep.starts_with(path)
     }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static TEST_PATHS: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Paths [`Keep::load`] returns on this thread until [`clear_test_paths`].
+#[cfg(all(test, unix))]
+pub(crate) fn set_test_paths(paths: Vec<PathBuf>) {
+    TEST_PATHS.with(|p| *p.borrow_mut() = Some(paths));
+}
+
+/// Drop the paths [`set_test_paths`] installed.
+#[cfg(all(test, unix))]
+pub(crate) fn clear_test_paths() {
+    TEST_PATHS.with(|p| *p.borrow_mut() = None);
+}
+
+#[cfg(all(test, unix))]
+fn test_paths() -> Option<Vec<PathBuf>> {
+    TEST_PATHS.with(|p| p.borrow().clone())
 }
 
 /// The keep file beside the active config file.

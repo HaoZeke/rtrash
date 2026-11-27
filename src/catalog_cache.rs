@@ -2,18 +2,23 @@
 //!
 //! `list` (and everything that collects the same records) reuses the blob
 //! when every name in `info/` and `files/` still has the same kind, device,
-//! inode, size and timestamps, and each of those times is strictly older
-//! than the blob. Anything else is a full read of the records: a changed
-//! name, a rewrite by another tool, a coarse clock that stores no
-//! nanoseconds, a short or undecryptable blob, or `RTRASH_NO_CACHE`.
+//! inode, size, timestamps and record hash, and every modification time
+//! is older than the blob by the coarse-clock margin. Anything else is a
+//! full read of the records: a changed name, a rewrite by another tool
+//! (including one that keeps the timestamps), a clock with no nanoseconds,
+//! a short or undecryptable blob, or `RTRASH_NO_CACHE`.
 //!
 //! The blob is XChaCha20-Poly1305 under `$XDG_CACHE_HOME/rtrash`. The
 //! 32-byte key is mode 0600 at `$XDG_DATA_HOME/rtrash/cache.key`. Put,
 //! restore, rm and empty delete the blob before they change the trash, so
 //! a hit cannot replay entries from before that command.
 
+use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -50,8 +55,10 @@ pub(crate) struct Saved {
 /// blob is newer than every name it covers.
 pub(crate) struct Stamp {
     bytes: Vec<u8>,
+    /// Newest modification time in the stamp. ctime stays in `bytes`:
+    /// `utimensat` cannot move it backward, and a rewrite that leaves both
+    /// times unchanged changes the record hash instead.
     max_m: (i64, i64),
-    max_c: (i64, i64),
 }
 
 impl PartialEq for Stamp {
@@ -122,7 +129,7 @@ pub(crate) fn store_if_unchanged(dir: &TrashDir, before: &Stamp, saved: &Saved) 
     let Some(after) = stamp_of(dir) else {
         return;
     };
-    if after != *before {
+    if after != *before || !mtime_settled(&after) || !bodies_match(&after.bytes, saved) {
         return;
     }
     let Some(plain) = encode(dir, &after, saved) else {
@@ -137,16 +144,18 @@ pub(crate) fn store_if_unchanged(dir: &TrashDir, before: &Stamp, saved: &Saved) 
     let Some(path) = cache_path(dir) else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        if fs::create_dir_all(parent).is_err() {
-            return;
-        }
-        let _ = fs::set_permissions(parent, mode(0o700));
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if !ensure_private_dir(parent) {
+        return;
     }
     if crate::file_replace::write_own(&path, &blob).is_err() {
         return;
     }
-    if fs::set_permissions(&path, mode(0o600)).is_err() {
+    // Opened with O_NOFOLLOW. A link planted at this path is not written
+    // through, and a file anyone else can read is not kept.
+    if !private_blob(&path, &after) {
         let _ = fs::remove_file(&path);
     }
 }
@@ -166,23 +175,78 @@ pub(crate) fn invalidate_root(root: &Path) {
 fn load_inner(dir: &TrashDir) -> Option<Saved> {
     let live = stamp_of(dir)?;
     let path = cache_path(dir)?;
-    let meta = fs::symlink_metadata(&path).ok()?;
-    if !meta.is_file() || !older_than_file(&live, &meta) {
+    let parent = path.parent()?;
+    if !dir_is_private(parent) {
         return None;
     }
-    let raw = fs::read(&path).ok()?;
+    let (raw, meta) = read_private(&path)?;
+    if !older_than_file(&live, &meta) {
+        return None;
+    }
     if raw.len() < MAGIC.len() + NONCE_LEN + 16 || &raw[..4] != MAGIC {
         return None;
     }
     let key = read_key()?;
     let plain = open(&key, &raw[4..4 + NONCE_LEN], &raw[4 + NONCE_LEN..])?;
-    decode(dir, &live, &plain)
+    let saved = decode(dir, &live, &plain)?;
+    bodies_match(&live.bytes, &saved).then_some(saved)
 }
 
 fn older_than_file(stamp: &Stamp, meta: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let file = (meta.mtime(), meta.mtime_nsec());
-    before(stamp.max_m, file) && before(stamp.max_c, file)
+    let blob = (meta.mtime(), meta.mtime_nsec());
+    // The blob's own mtime is the clock the file system stamped it with.
+    // A source mtime within the margin can share that coarse tick, so it
+    // is not evidence the records were quiet while the blob was written.
+    before(stamp.max_m, sub_ns(blob, margin_ns()))
+}
+
+/// Newest modification time is at least the margin behind the system clock.
+/// The post-write check against the blob is the one that decides; this
+/// only skips writing a blob that check would delete.
+fn mtime_settled(stamp: &Stamp) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() as i64, d.subsec_nanos() as i64))
+        .unwrap_or((i64::MAX, 0));
+    before(stamp.max_m, sub_ns(now, margin_ns()))
+}
+
+fn sub_ns(t: (i64, i64), margin: u128) -> (i64, i64) {
+    let ns = i128::from(t.0) * 1_000_000_000 + i128::from(t.1) - (margin as i128);
+    (
+        ns.div_euclid(1_000_000_000) as i64,
+        ns.rem_euclid(1_000_000_000) as i64,
+    )
+}
+
+/// How long a file stamp can stay still while its nanosecond field is not
+/// zero. Linux `CLOCK_REALTIME_COARSE` is that clock (about 4 ms here) and
+/// a blob written a few ticks later is still inside the race, so the
+/// margin is twice the measured tick and at least twice 10 ms.
+fn margin_ns() -> u128 {
+    coarse_tick_ns().max(10_000_000).saturating_mul(2)
+}
+
+fn coarse_tick_ns() -> u128 {
+    #[cfg(target_os = "linux")]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` is a writable timespec and the clock id is a constant.
+        let rc = unsafe { libc::clock_getres(libc::CLOCK_REALTIME_COARSE, &mut ts) };
+        if rc == 0 {
+            let ns = (ts.tv_sec as u128)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(ts.tv_nsec as u128);
+            if ns > 0 {
+                return ns;
+            }
+        }
+    }
+    10_000_000
 }
 
 fn before(earlier: (i64, i64), later: (i64, i64)) -> bool {
@@ -204,18 +268,12 @@ fn stamp_of(dir: &TrashDir) -> Option<Stamp> {
     }
     rows.sort_by(|a, b| a.slot.cmp(&b.slot).then(a.name.cmp(&b.name)));
     let mut max_m = (i64::MIN, 0);
-    let mut max_c = (i64::MIN, 0);
     let mut bytes = Vec::new();
     for row in &rows {
         max_m = later(max_m, (row.mtime, row.mtime_n));
-        max_c = later(max_c, (row.ctime, row.ctime_n));
         push_row(&mut bytes, row);
     }
-    Some(Stamp {
-        bytes,
-        max_m,
-        max_c,
-    })
+    Some(Stamp { bytes, max_m })
 }
 
 fn later(a: (i64, i64), b: (i64, i64)) -> (i64, i64) {
@@ -237,6 +295,7 @@ struct Row {
     mtime_n: i64,
     ctime: i64,
     ctime_n: i64,
+    hash: u128,
 }
 
 fn dir_row(slot: u8, path: &Path) -> Option<Row> {
@@ -244,7 +303,7 @@ fn dir_row(slot: u8, path: &Path) -> Option<Row> {
     if !meta.is_dir() {
         return None;
     }
-    Some(row_from(slot, Vec::new(), &meta))
+    Some(row_from(slot, Vec::new(), &meta, 0))
 }
 
 fn push_children(slot: u8, dir: &Path, rows: &mut Vec<Row>) -> Option<()> {
@@ -259,12 +318,31 @@ fn push_children(slot: u8, dir: &Path, rows: &mut Vec<Row>) -> Option<()> {
             use std::os::unix::ffi::OsStrExt;
             ent.file_name().as_bytes().to_vec()
         };
-        rows.push(row_from(slot, name, &meta));
+        // Records are tiny. Their hash is what a same-tick rewrite changes
+        // when the coarse clock leaves mtime, ctime, inode and size alone.
+        // `files/` is not hashed: a payload there can be the user's data.
+        let hash = if slot == 2 && meta.file_type().is_file() && is_record_name(&name) {
+            hash_record(&ent.path())?
+        } else {
+            0
+        };
+        rows.push(row_from(slot, name, &meta, hash));
     }
     Some(())
 }
 
-fn row_from(slot: u8, name: Vec<u8>, meta: &fs::Metadata) -> Row {
+fn is_record_name(name: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let fname = crate::util::str_from_os_ref(std::ffi::OsStr::from_bytes(name));
+    crate::util::trash_item_name(&fname).is_some()
+}
+
+fn hash_record(path: &Path) -> Option<u128> {
+    let body = crate::info::read_bounded(path, crate::info::RECORD_CAP).ok()?;
+    Some(fnv128(b"rtrash-record-v1", &body))
+}
+
+fn row_from(slot: u8, name: Vec<u8>, meta: &fs::Metadata, hash: u128) -> Row {
     use std::os::unix::fs::MetadataExt;
     let ft = meta.file_type();
     let kind = if ft.is_symlink() {
@@ -287,6 +365,7 @@ fn row_from(slot: u8, name: Vec<u8>, meta: &fs::Metadata) -> Row {
         mtime_n: meta.mtime_nsec(),
         ctime: meta.ctime(),
         ctime_n: meta.ctime_nsec(),
+        hash,
     }
 }
 
@@ -301,6 +380,7 @@ fn push_row(out: &mut Vec<u8>, row: &Row) {
     push_i64(out, row.ctime);
     push_i64(out, row.ctime_n);
     push_bytes(out, &row.name);
+    push_u128(out, row.hash);
 }
 
 fn encode(dir: &TrashDir, stamp: &Stamp, saved: &Saved) -> Option<Vec<u8>> {
@@ -432,6 +512,9 @@ fn push_u64(b: &mut Vec<u8>, v: u64) {
 fn push_i64(b: &mut Vec<u8>, v: i64) {
     b.extend_from_slice(&v.to_le_bytes());
 }
+fn push_u128(b: &mut Vec<u8>, v: u128) {
+    b.extend_from_slice(&v.to_le_bytes());
+}
 fn push_bytes(b: &mut Vec<u8>, v: &[u8]) {
     push_u32(b, v.len() as u32);
     b.extend_from_slice(v);
@@ -469,15 +552,17 @@ fn cache_path_of(root: &Path) -> Option<PathBuf> {
 
 fn cache_id(root: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
+    let h = fnv128(b"rtrash-catalog-v1", root.as_os_str().as_bytes());
+    format!("{h:032x}")
+}
+
+fn fnv128(prefix: &[u8], bytes: &[u8]) -> u128 {
     let mut h = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58du128;
-    for byte in b"rtrash-catalog-v1"
-        .iter()
-        .chain(root.as_os_str().as_bytes())
-    {
+    for byte in prefix.iter().chain(bytes) {
         h ^= u128::from(*byte);
         h = h.wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013B);
     }
-    format!("{h:032x}")
+    h
 }
 
 fn cache_dir() -> Option<PathBuf> {
@@ -508,44 +593,59 @@ fn xdg(var: &str, home_rel: &str) -> Option<PathBuf> {
 }
 
 fn read_key() -> Option<[u8; KEY_LEN]> {
-    let bytes = fs::read(key_path()?).ok()?;
+    let path = key_path()?;
+    let parent = path.parent()?;
+    if !dir_is_private(parent) {
+        return None;
+    }
+    let (bytes, _) = read_private(&path)?;
     <[u8; KEY_LEN]>::try_from(bytes).ok()
 }
 
 fn load_or_create_key() -> Option<[u8; KEY_LEN]> {
     let path = key_path()?;
-    match fs::read(&path) {
-        Ok(bytes) => match <[u8; KEY_LEN]>::try_from(bytes) {
-            Ok(key) => Some(key),
-            Err(_) => {
-                let _ = fs::remove_file(&path);
-                create_key(&path)
-            }
-        },
-        Err(e) if e.kind() == io::ErrorKind::NotFound => create_key(&path),
-        Err(_) => None,
+    let parent = path.parent()?;
+    if !ensure_private_dir(parent) {
+        return None;
     }
+    if let Some(key) = read_key() {
+        return Some(key);
+    }
+    // A symlink is removed as a link. A loose file of ours is replaced.
+    // Someone else's file is left where it is, and there is no key.
+    if path_exists(&path) && !discard_untrusted(&path) {
+        return None;
+    }
+    create_key(&path)
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// Remove a symlink or a regular file this user owns at `path`.
+fn discard_untrusted(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return true;
+    };
+    let ours = meta.file_type().is_symlink() || (meta.is_file() && meta.uid() == our_uid());
+    ours && fs::remove_file(path).is_ok()
 }
 
 fn create_key(path: &Path) -> Option<[u8; KEY_LEN]> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut key = [0u8; KEY_LEN];
     fill_random(&mut key).ok()?;
-    if let Some(parent) = path.parent() {
-        if fs::create_dir_all(parent).is_err() {
-            return None;
-        }
-        let _ = fs::set_permissions(parent, mode(0o700));
-    }
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true).mode(0o600);
     match opts.open(path) {
         Ok(mut f) => {
-            if f.write_all(&key).is_err() || f.sync_all().is_err() {
-                let _ = fs::remove_file(path);
-                return None;
-            }
-            if fs::set_permissions(path, mode(0o600)).is_err() {
+            let bad = f.write_all(&key).is_err()
+                || f.sync_all().is_err()
+                || f.set_permissions(mode(0o600)).is_err()
+                || !f.metadata().is_ok_and(|m| private_file(&m));
+            if bad {
                 let _ = fs::remove_file(path);
                 return None;
             }
@@ -554,6 +654,161 @@ fn create_key(path: &Path) -> Option<[u8; KEY_LEN]> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => read_key(),
         Err(_) => None,
     }
+}
+
+/// `path` is this user's real directory, and group and other have no
+/// permission on it. A symlink is not one. When `tighten` is set, a
+/// directory we own is chmodded to 0700; a chmod that does not land is
+/// a refusal.
+fn ensure_private_dir(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => false,
+        Ok(_) => tighten_dir(path),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(path)
+                .is_ok()
+                && tighten_dir(path)
+        }
+        Err(_) => false,
+    }
+}
+
+fn tighten_dir(path: &Path) -> bool {
+    let Ok(file) = open_dir(path) else {
+        return false;
+    };
+    if dir_file_private(&file) {
+        return true;
+    }
+    file.set_permissions(mode(0o700)).is_ok() && dir_file_private(&file)
+}
+
+fn dir_is_private(path: &Path) -> bool {
+    open_dir(path).is_ok_and(|f| dir_file_private(&f))
+}
+
+fn dir_file_private(file: &fs::File) -> bool {
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    meta.is_dir() && meta.uid() == our_uid() && meta.permissions().mode() & 0o077 == 0
+}
+
+fn private_blob(path: &Path, stamp: &Stamp) -> bool {
+    let Ok(file) = open_nofollow(path) else {
+        return false;
+    };
+    if file.set_permissions(mode(0o600)).is_err() {
+        return false;
+    }
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    private_file(&meta) && older_than_file(stamp, &meta)
+}
+
+fn read_private(path: &Path) -> Option<(Vec<u8>, fs::Metadata)> {
+    let file = open_nofollow(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !private_file(&meta) {
+        return None;
+    }
+    let mut raw = Vec::new();
+    file.take(1 << 28).read_to_end(&mut raw).ok()?;
+    Some((raw, meta))
+}
+
+fn private_file(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_file()
+        && meta.uid() == our_uid()
+        && meta.permissions().mode() & 0o077 == 0
+        && meta.permissions().mode() & 0o400 != 0
+}
+
+fn our_uid() -> u32 {
+    unsafe { libc::geteuid() as u32 }
+}
+
+fn open_dir(path: &Path) -> io::Result<fs::File> {
+    open_flags(
+        path,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    )
+}
+
+fn open_nofollow(path: &Path) -> io::Result<fs::File> {
+    open_flags(path, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+}
+
+fn open_flags(path: &Path, flags: i32) -> io::Result<fs::File> {
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "interior nul"))?;
+    // SAFETY: `c` is NUL-terminated. O_NOFOLLOW applies to the last
+    // component. The descriptor is owned by the returned file.
+    let fd = unsafe { libc::open(c.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    Ok(fs::File::from(owned))
+}
+
+/// The sealed bodies are the bytes the stamp hashed. A blob whose record
+/// text is not those bytes is not a catalog, even when the stamp's times
+/// still match the files.
+fn bodies_match(stamp: &[u8], saved: &Saved) -> bool {
+    let Some(rows) = record_hashes(stamp) else {
+        return false;
+    };
+    if rows.len() != saved.records.len() {
+        return false;
+    }
+    let mut used = vec![false; saved.records.len()];
+    for (name, hash) in &rows {
+        let Some(i) = saved.records.iter().position(|r| r.file_name == *name) else {
+            return false;
+        };
+        if used[i] || fnv128(b"rtrash-record-v1", &saved.records[i].body) != *hash {
+            return false;
+        }
+        used[i] = true;
+    }
+    used.iter().all(|u| *u)
+}
+
+fn record_hashes(stamp: &[u8]) -> Option<Vec<(Vec<u8>, u128)>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < stamp.len() {
+        let rest = stamp.get(i..)?;
+        // slot, kind, then seven 8-byte fields, then a length-prefixed name
+        // and the record hash. 58 is everything before the name's length.
+        if rest.len() < 62 + 16 {
+            return None;
+        }
+        let slot = rest[0];
+        let name_len = u32::from_le_bytes(rest[58..62].try_into().ok()?) as usize;
+        if name_len > NAME_CAP {
+            return None;
+        }
+        let name_end = 62usize.checked_add(name_len)?;
+        let hash_end = name_end.checked_add(16)?;
+        if rest.len() < hash_end {
+            return None;
+        }
+        if slot == 2 {
+            let name = rest[62..name_end].to_vec();
+            if is_record_name(&name) {
+                let hash = u128::from_le_bytes(rest[name_end..hash_end].try_into().ok()?);
+                out.push((name, hash));
+            }
+        }
+        i += hash_end;
+    }
+    Some(out)
 }
 
 fn fill_random(buf: &mut [u8]) -> io::Result<()> {
@@ -652,16 +907,44 @@ mod tests {
         fs::write(dir.files().join(name), b"payload").unwrap();
     }
 
+    /// Modification times two seconds back, past the coarse-clock margin.
+    /// `utimensat` cannot move ctime; the margin is on mtime.
+    fn backdate_tree(dir: &TrashDir) {
+        let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+        let set = |p: &std::path::Path| {
+            let f = fs::OpenOptions::new().read(true).open(p).unwrap();
+            let times = fs::FileTimes::new().set_accessed(ago).set_modified(ago);
+            f.set_times(times).unwrap();
+        };
+        for root in [dir.info(), dir.files()] {
+            for ent in fs::read_dir(&root).unwrap().flatten() {
+                set(&ent.path());
+            }
+            set(&root);
+        }
+    }
+
+    fn same_meta(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        before.mtime() == after.mtime()
+            && before.mtime_nsec() == after.mtime_nsec()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
+            && before.ino() == after.ino()
+            && before.len() == after.len()
+    }
+
     #[test]
     fn a_round_trip_is_sealed_and_a_rewrite_misses() {
         let iso = Isolated::open();
         write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        backdate_tree(&iso.dir);
         let before = stamp(&iso.dir).expect("stamp");
         let saved = Saved {
             records: vec![Record {
                 name: "hello.txt".into(),
                 file_name: b"hello.txt.trashinfo".to_vec(),
-                body: b"[Trash Info]\nPath=/tmp/hello.txt\n".to_vec(),
+                body: fs::read(iso.dir.info().join("hello.txt.trashinfo")).unwrap(),
             }],
             strays: 0,
         };
@@ -695,6 +978,7 @@ mod tests {
     fn a_damaged_blob_is_not_a_catalog() {
         let iso = Isolated::open();
         write_record(&iso.dir, "a.txt", "/tmp/a.txt");
+        backdate_tree(&iso.dir);
         let before = stamp(&iso.dir).unwrap();
         store_if_unchanged(
             &iso.dir,
@@ -720,6 +1004,7 @@ mod tests {
     fn collect_hits_the_second_time_and_sees_an_external_edit() {
         let iso = Isolated::open();
         write_record(&iso.dir, "item.txt", "/tmp/catalog-before");
+        backdate_tree(&iso.dir);
         let first = crate::list::collect(std::slice::from_ref(&iso.dir));
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].original, PathBuf::from("/tmp/catalog-before"));
@@ -743,5 +1028,225 @@ mod tests {
         );
         let notes = NOTES.with(|n| n.borrow().clone());
         assert_eq!(notes, ["scan"], "an external edit must not hit");
+    }
+
+    fn swapped_body(old: &[u8]) -> Vec<u8> {
+        let from = b"/tmp/catalog-before";
+        let to = b"/tmp/catalog-rewrit";
+        assert_eq!(from.len(), to.len());
+        let at = old
+            .windows(from.len())
+            .position(|w| w == from)
+            .expect("path");
+        let mut body = old.to_vec();
+        body[at..at + from.len()].copy_from_slice(to);
+        body
+    }
+
+    fn saved_old(body: Vec<u8>) -> Saved {
+        Saved {
+            records: vec![Record {
+                name: "item.txt".into(),
+                file_name: b"item.txt.trashinfo".to_vec(),
+                body,
+            }],
+            strays: 0,
+        }
+    }
+
+    fn assert_not_the_old_path(got: Option<Saved>) {
+        if let Some(got) = got {
+            let body = &got.records[0].body;
+            assert!(
+                !body
+                    .windows(b"/tmp/catalog-before".len())
+                    .any(|w| w == b"/tmp/catalog-before"),
+                "stale catalog served the path from before the rewrite"
+            );
+        }
+    }
+
+    /// The gap the coarse clock hides: the record is rewritten in its own
+    /// tick, then the blob is written on a later tick. The old path must
+    /// not come back.
+    #[test]
+    fn a_same_length_rewrite_in_one_tick_is_not_served() {
+        let iso = Isolated::open();
+        let info = iso.dir.info().join("item.txt.trashinfo");
+        let mut stuck = false;
+        for _ in 0..100 {
+            write_record(&iso.dir, "item.txt", "/tmp/catalog-before");
+            let before_meta = fs::symlink_metadata(&info).unwrap();
+            let before = stamp(&iso.dir).expect("stamp");
+            let old = fs::read(&info).unwrap();
+            fs::write(&info, swapped_body(&old)).unwrap();
+            if !same_meta(&before_meta, &fs::symlink_metadata(&info).unwrap()) {
+                continue;
+            }
+            stuck = true;
+            // Past the margin, so a check on the times alone would keep a
+            // blob written now. The record hash is what must refuse it.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            store_if_unchanged(&iso.dir, &before, &saved_old(old));
+            assert_not_the_old_path(load(&iso.dir));
+            let listed = crate::list::collect(std::slice::from_ref(&iso.dir));
+            assert_eq!(listed[0].original, PathBuf::from("/tmp/catalog-rewrit"));
+            break;
+        }
+        assert!(
+            stuck,
+            "a same-tick same-length rewrite never kept its stamp"
+        );
+    }
+
+    /// Unlink plus create in the same coarse tick reuses the inode and
+    /// leaves the directory stamp unchanged. The new record is what a
+    /// later list shows.
+    #[test]
+    fn an_inode_reuse_in_one_tick_is_not_served() {
+        let iso = Isolated::open();
+        let info = iso.dir.info().join("item.txt.trashinfo");
+        let mut stuck = false;
+        for _ in 0..100 {
+            write_record(&iso.dir, "item.txt", "/tmp/catalog-before");
+            let before = stamp(&iso.dir).expect("stamp");
+            let old = fs::read(&info).unwrap();
+            let file_meta = fs::symlink_metadata(&info).unwrap();
+            let dir_meta = fs::symlink_metadata(iso.dir.info()).unwrap();
+            fs::remove_file(&info).unwrap();
+            fs::write(&info, swapped_body(&old)).unwrap();
+            let file_after = fs::symlink_metadata(&info).unwrap();
+            let dir_after = fs::symlink_metadata(iso.dir.info()).unwrap();
+            if !same_meta(&file_meta, &file_after) || !same_meta(&dir_meta, &dir_after) {
+                continue;
+            }
+            stuck = true;
+            // Past the margin, so a check on the times alone would keep a
+            // blob written now. The record hash is what must refuse it.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            store_if_unchanged(&iso.dir, &before, &saved_old(old));
+            assert_not_the_old_path(load(&iso.dir));
+            let listed = crate::list::collect(std::slice::from_ref(&iso.dir));
+            assert_eq!(listed[0].original, PathBuf::from("/tmp/catalog-rewrit"));
+            break;
+        }
+        assert!(
+            stuck,
+            "unlink plus create in one tick never reused the inode"
+        );
+    }
+
+    fn seal_hello(iso: &Isolated) {
+        let before = stamp(&iso.dir).unwrap();
+        let body = fs::read(iso.dir.info().join("hello.txt.trashinfo")).unwrap();
+        store_if_unchanged(
+            &iso.dir,
+            &before,
+            &Saved {
+                records: vec![Record {
+                    name: "hello.txt".into(),
+                    file_name: b"hello.txt.trashinfo".to_vec(),
+                    body,
+                }],
+                strays: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn a_symlink_key_is_not_followed() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        backdate_tree(&iso.dir);
+        let target = iso.root.join("other-key");
+        fs::write(&target, [9u8; 32]).unwrap();
+        fs::set_permissions(&target, mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, key_path().unwrap()).unwrap();
+        seal_hello(&iso);
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            vec![9u8; 32],
+            "opening the key followed the symlink"
+        );
+        assert!(
+            fs::symlink_metadata(key_path().unwrap())
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "the key path is still a symlink"
+        );
+    }
+
+    #[test]
+    fn a_group_readable_key_is_not_used() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        backdate_tree(&iso.dir);
+        seal_hello(&iso);
+        assert!(load(&iso.dir).is_some());
+        fs::set_permissions(key_path().unwrap(), mode(0o644)).unwrap();
+        assert!(
+            load(&iso.dir).is_none(),
+            "a key other users can read is used"
+        );
+        let mode = fs::symlink_metadata(key_path().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o644, "reading the catalog replaced the loose key");
+    }
+
+    #[test]
+    fn a_symlink_blob_is_not_a_catalog() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        backdate_tree(&iso.dir);
+        seal_hello(&iso);
+        let blob = cache_path(&iso.dir).unwrap();
+        let side = iso.root.join("blob-copy");
+        fs::copy(&blob, &side).unwrap();
+        fs::set_permissions(&side, mode(0o600)).unwrap();
+        let bytes = fs::read(&side).unwrap();
+        fs::remove_file(&blob).unwrap();
+        std::os::unix::fs::symlink(&side, &blob).unwrap();
+        assert!(load(&iso.dir).is_none(), "a symlink blob was followed");
+        assert_eq!(fs::read(&side).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_symlink_cache_directory_is_not_written_through() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        backdate_tree(&iso.dir);
+        let cache = iso.root.join("cache");
+        fs::remove_dir_all(&cache).unwrap();
+        let other = iso.root.join("other-cache");
+        fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&other, &cache).unwrap();
+        seal_hello(&iso);
+        assert!(
+            fs::read_dir(&other).unwrap().next().is_none(),
+            "the catalog was written through the directory symlink"
+        );
+    }
+
+    #[test]
+    fn a_loose_cache_directory_is_not_read_until_it_is_private() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        backdate_tree(&iso.dir);
+        seal_hello(&iso);
+        assert!(load(&iso.dir).is_some());
+        let cache = iso.root.join("cache");
+        fs::set_permissions(&cache, mode(0o755)).unwrap();
+        assert!(
+            load(&iso.dir).is_none(),
+            "a cache directory other users can read was used"
+        );
+        seal_hello(&iso);
+        let bits = fs::symlink_metadata(&cache).unwrap().permissions().mode() & 0o777;
+        assert_eq!(bits, 0o700, "storing left the directory readable by others");
+        assert!(load(&iso.dir).is_some());
     }
 }

@@ -773,17 +773,17 @@ itself or the whole trash; no command lists it or acts on it, and a full
 .B empty
 clears it.
 .PP
-While
-.I info/
-and
-.I files/
-are unchanged, list reuses a sealed catalog of the records
+List reuses a sealed catalog of the records
 (see
 .I $XDG_CACHE_HOME/rtrash
 under
-.BR FILES ).
-Put, restore, rm, empty and any other change to those directories
-drop it.
+.BR FILES )
+when those records still match it.
+Put, restore, rm and empty remove the catalog.
+A change another tool makes does not: the catalog is ignored and the
+records are read.
+Empty, a size budget and the check before an unscoped empty read each
+record again before they delete.
 .B RTRASH_NO_CACHE=1
 reads every record.
 .TP
@@ -5226,14 +5226,9 @@ and
 write walked sizes back.
 .TP
 .I $XDG_CACHE_HOME/rtrash/c\-*.bin
-Sealed catalog of one trash's records, so a later list can skip
-reading each
-.I .trashinfo
-while
-.I info/
-and
-.I files/
-are unchanged.
+Sealed catalog of one trash's records. A later list reuses it when
+the records still match and their modification times are older than
+the catalog by more than the coarse clock's tick.
 The key is
 .I $XDG_DATA_HOME/rtrash/cache.key
 (mode 0600).

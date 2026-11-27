@@ -12,7 +12,7 @@ a glob character (* ? [), like --glob.
 Payloads with no .trashinfo come last, dated ????-??-??, under their path
 in the trash (\"orphan\":true in JSON); an age filter leaves them out.
 An unchanged trash is listed from a sealed catalog of its records.
-RTRASH_NO_CACHE=1 reads every record instead.
+A change by another tool is read again. RTRASH_NO_CACHE=1 reads every record.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  list only this trash directory (repeatable);
@@ -233,6 +233,52 @@ pub fn git_risks(dir: &TrashDir) -> Option<Vec<(PathBuf, String, crate::du_git::
 pub fn entry_named(dir: &TrashDir, name: &str) -> Option<Entry> {
     let record = crate::util::join_info(&dir.info(), name);
     read_entry(dir, &record, name, Pathless::Keep).ok()
+}
+
+/// `entry` read again from its record. `None` when the name is not a trash
+/// item, or the record is missing or cannot be read. A deletion uses this,
+/// not the body a catalog or an earlier scan returned: those can still name
+/// the path, date or batch the record had in an earlier coarse tick.
+pub(crate) fn confirmed(entry: &Entry) -> Option<Entry> {
+    if !entry.recorded {
+        return None;
+    }
+    confirmed_named(&entry.dir, &entry.name)
+}
+
+/// [`confirmed`] for a trash item named `name`.
+pub(crate) fn confirmed_named(dir: &TrashDir, name: &str) -> Option<Entry> {
+    let fname = format!("{name}.trashinfo");
+    crate::util::trash_item_name(&fname)?;
+    entry_named(dir, name)
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_COLLECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` once, on this thread, after the next collect that a deletion
+/// re-reads. The collect's entries stay as they were; the records on disk
+/// may not.
+#[cfg(test)]
+pub(crate) fn on_after_collect(f: Box<dyn FnOnce()>) {
+    AFTER_COLLECT.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Take the hook [`on_after_collect`] stored, if a test set one.
+#[cfg(test)]
+pub(crate) fn fire_after_collect() {
+    if let Some(f) = AFTER_COLLECT.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+/// Drop a hook [`on_after_collect`] stored, without running it.
+#[cfg(test)]
+pub(crate) fn clear_after_collect() {
+    AFTER_COLLECT.with(|h| *h.borrow_mut() = None);
 }
 
 /// Every item the records in `dirs` name, oldest first. A record that

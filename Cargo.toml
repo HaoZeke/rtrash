@@ -63,12 +63,6 @@ python = ["dep:pyo3"]
 [dependencies]
 libc = "0.2"
 rayon = "1.10"
-# Sealed per-root catalog of trash records. Pure Rust; the nonce comes
-# from /dev/urandom, so the getrandom feature stays off.
-chacha20poly1305 = { version = "0.10.1", default-features = false, features = [
-  "alloc",
-  "std",
-] }
 # Decoder only, pure Rust, no dependencies: reads ncdu 2 binary exports.
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 pyo3 = { version = "0.29", optional = true, features = ["extension-module"] }
@@ -85,6 +79,14 @@ regex-lite = "0.1"
 # Finder may keep a name decomposed (NFD) where the user types it
 # composed (NFC). Glob matching compares Unicode paths in NFC.
 unicode-normalization = { version = "0.1", default-features = false, features = [
+  "std",
+] }
+
+# Sealed per-root catalog of trash records. Unix only. Pure Rust; the nonce
+# comes from /dev/urandom, so the getrandom feature stays off.
+[target.'cfg(unix)'.dependencies]
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = [
+  "alloc",
   "std",
 ] }
 

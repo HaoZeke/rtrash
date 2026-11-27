@@ -1087,10 +1087,17 @@ OWN = "a file rtrash wrote itself (cache, temp or link), not user data"
 MOVE = "a move: the source goes only after the whole copy is in place"
 BATCH = "a batch the caller counted up front with permanent_guard::gate_many"
 PERMANENT_ALLOW = {
-    ("catalog_cache.rs", "create_key"): (2, OWN + ": a key file it could not finish writing"),
+    ("catalog_cache.rs", "create_key"): (1, OWN + ": a key file it could not finish writing"),
+    ("catalog_cache.rs", "discard_untrusted"): (
+        1,
+        OWN + ": a key path that is a symlink or a file group or other can read",
+    ),
     ("catalog_cache.rs", "invalidate_root"): (1, OWN + ": the sealed catalog of a trash that changed"),
-    ("catalog_cache.rs", "load_or_create_key"): (1, OWN + ": a key file of the wrong length"),
-    ("catalog_cache.rs", "store_if_unchanged"): (1, OWN + ": the catalog blob when its mode cannot be set"),
+    ("catalog_cache.rs", "store_if_unchanged"): (
+        1,
+        OWN + ": the catalog blob when it is not a private file, or when a "
+        "source mtime still shares the blob's coarse tick",
+    ),
     ("du_dupes.rs", "clone_file"): (2, OWN + ": the clone target it just created"),
     ("du_dupes.rs", "link_one"): (2, OWN + ": the .rtrash-link temp beside the duplicate"),
     ("empty.rs", "empty_exact"): (1, RECORD),
@@ -1895,7 +1902,8 @@ LOCK_SITES = {
 LOCKED_REMOVERS = {
     ("src/empty.rs", "empty_one"): "runs with the lock held, scans under it and checks "
                                    "each item against trashdir::Seen",
-    ("src/retention.rs", "remove_entry"): "prune lists the items under the locks it holds",
+    ("src/retention.rs", "remove_entry"): "prune holds the locks and re-reads each record "
+                                           "before it removes one that still matches",
     ("src/wsl_bin.rs", "remove_entry"): "the Windows Recycle Bin has no trash lock; "
                                         "BinEntry::recheck reads the record again first",
 }
