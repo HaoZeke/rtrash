@@ -847,3 +847,58 @@ fn put_files_from_trashes_the_listed_paths() {
     assert!(work.join("keep.txt").exists());
     let _ = fs::remove_dir_all(&home);
 }
+
+/// `-0` clusters with `-f`, `--files0-from` is the NUL list, and a usage
+/// error for these flags names `--help`.
+#[test]
+fn put_zero_clusters_and_names_help() {
+    let home = home("put-zero-cluster");
+    let work = home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(work.join(name), b"x").unwrap();
+    }
+    let list = home.join("list");
+    fs::write(&list, "a.txt\0").unwrap();
+    let arg = format!("--files-from={}", s(&list));
+    let out = common::rtrash(&home)
+        .args(["put", "-f0", &arg])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("a.txt").exists());
+
+    fs::write(&list, "b.txt\0").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "-0f", "--files-from", &s(&list)])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("b.txt").exists());
+
+    fs::write(&list, "c.txt\0").unwrap();
+    let arg0 = format!("--files0-from={}", s(&list));
+    let out = common::rtrash(&home)
+        .args(["put", &arg0])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("c.txt").exists());
+
+    fs::write(work.join("keep.txt"), b"k").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "--zero", &s(&work.join("keep.txt"))])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    let err = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--zero requires --files-from"), "{err}");
+    assert!(err.contains("Try"), "{err}");
+    assert!(err.contains("--help"), "{err}");
+    assert!(work.join("keep.txt").exists());
+    let _ = fs::remove_dir_all(&home);
+}

@@ -1012,6 +1012,88 @@ fn put_files_from_trashes_the_listed_paths() {
     );
 }
 
+/// `-0` clusters with other short options. The lists are NUL records, so a
+/// loop that still rejects `0` exits 2 and these files stay.
+#[test]
+fn put_zero_clusters_with_other_short_options() {
+    let sb = Sandbox::new("put-zero-cluster");
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    sb.touch("c.txt");
+    fs::create_dir(sb.work().join("d")).unwrap();
+    fs::write(sb.work().join("d/x"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let list = sb.root.join("list");
+    let arg = format!("--files-from={}", list.display());
+
+    fs::write(&list, "a.txt\0").unwrap();
+    let out = sb.run(&["put", &pin, "-f0", &arg]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("a.txt").exists(), "a.txt stayed");
+
+    fs::write(&list, "b.txt\0").unwrap();
+    let out = sb.run(&["put", &pin, "-0f", &arg]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("b.txt").exists(), "b.txt stayed");
+
+    fs::write(&list, "d\0").unwrap();
+    let out = sb.run(&["put", &pin, "-rf0", &arg]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("d").exists(), "d stayed");
+
+    fs::write(&list, "c.txt\0").unwrap();
+    let arg0 = format!("--files0-from={}", list.display());
+    let out = sb.run(&["put", &pin, &arg0]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("c.txt").exists(), "c.txt stayed");
+}
+
+/// Command-line operands stay ahead of `--files-from`. The JSON summary
+/// names them in that order.
+#[test]
+fn put_files_from_puts_command_line_paths_first() {
+    let sb = Sandbox::new("put-files-order");
+    sb.touch("argv.txt");
+    sb.touch("listed.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let list = sb.root.join("list");
+    fs::write(&list, "listed.txt\n").unwrap();
+    let arg = format!("--files-from={}", list.display());
+    let out = sb.run(&["put", &pin, "--json", &arg, "argv.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let line = stdout_of(&out);
+    let argv = line.find("argv.txt").unwrap_or_else(|| panic!("{line}"));
+    let listed = line.find("listed.txt").unwrap_or_else(|| panic!("{line}"));
+    assert!(argv < listed, "{line}");
+}
+
+/// `-i` and `--files-from=-` both read stdin, so put refuses before it
+/// moves anything. A list in a file still prompts, and `y` trashes it.
+#[test]
+fn put_i_refuses_files_from_on_stdin() {
+    let sb = Sandbox::new("put-files-stdin");
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let work = sb.work();
+    let out = common::assert_refused_unchanged(&"stdin prompt", &[work.as_path()], 2, &[], || {
+        sb.run_with_stdin(&["put", &pin, "-i", "--files-from=-"], "a.txt\ny\n")
+    });
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("--files-from=- and a prompt both read standard input"),
+        "{err}"
+    );
+
+    let list = sb.root.join("list");
+    fs::write(&list, "b.txt\n").unwrap();
+    let arg = format!("--files-from={}", list.display());
+    let out = sb.run_with_stdin(&["put", &pin, "-i", &arg], "y\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("b.txt").exists(), "b.txt stayed");
+    assert!(sb.work().join("a.txt").exists(), "a.txt was trashed");
+}
+
 /// Run rtrash in `cwd` with the trash under `data_home`.
 fn run_in(cwd: &Path, data_home: &Path, args: &[&str]) -> Output {
     common::rtrash(data_home)

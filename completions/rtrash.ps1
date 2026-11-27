@@ -6,7 +6,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
     param($wordToComplete, $commandAst, $cursorPosition)
     $subs = @('put', 'empty', 'list', 'status', 'trash-stats', 'du', 'restore', 'undo', 'rm', 'who', 'reap', 'finder', 'wsl', 'config', 'setup', 'keys', 'completions', 'man')
     $opts = @{
-        'put' = @('-f', '--force', '-i', '-I', '--interactive', '--inspect', '-r', '-R', '--recursive', '-d', '--dir', '-v', '--verbose', '--one-file-system', '--preserve-root', '--no-preserve-root', '--trash-dir=', '--home-only', '--plain', '--no-space-check', '--allow-cross-device', '--dry-run', '--in-use=', '--json', '--files-from=', '--zero', '--help', '--version')
+        'put' = @('-f', '--force', '-i', '-I', '--interactive', '--inspect', '-r', '-R', '--recursive', '-d', '--dir', '-v', '--verbose', '--one-file-system', '--preserve-root', '--no-preserve-root', '--trash-dir=', '--home-only', '--plain', '--no-space-check', '--allow-cross-device', '--dry-run', '--in-use=', '--json', '--files-from=', '--files0-from=', '-0', '--zero', '--help', '--version')
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '-f', '--force', '-i', '--interactive', '--all-users', '--plain', '--all', '--older-than=', '--max-size=', '--max-count=', '--prune=', '--until-free=', '--dangling', '--json', '--trash-dir=', '--home-only', '--help', '--version')
         'list' = @('--home-only', '--trash-dir=', '--all-users', '--volumes', '--trash-dirs', '--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--size', '--show-trashpath', '--sort=', '--reverse', '--last=', '--depth=', '--glob=', '--regex=', '--name=', '--cwd-only', '--directory=', '--json', '--format=', '--help', '--version')
         'status' = @('--home-only', '--trash-dir=', '--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--json', '--check', '--fix', '-n', '--dry-run', '--help', '--version')
@@ -28,7 +28,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
     # The Windows build has its own put, list, empty, restore, status and rm,
     # with fewer options (the Recycle Bin, not a FreeDesktop trash).
     $winOpts = @{
-        'put' = @('-f', '--force', '--inspect', '-v', '--verbose', '--dry-run', '--plain', '--json', '--in-use=', '--allow-permanent', '--allow-cross-device', '--trash-dir=', '--home-only', '--files-from=', '--zero', '--help', '--version')
+        'put' = @('-f', '--force', '--inspect', '-v', '--verbose', '--dry-run', '--plain', '--json', '--in-use=', '--allow-permanent', '--allow-cross-device', '--trash-dir=', '--home-only', '--files-from=', '--files0-from=', '-0', '--zero', '--help', '--version')
         'list' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--glob=', '--regex=', '--name=', '--cwd-only', '--directory=', '--sort=', '--reverse', '--last=', '--depth=', '--size', '--show-trashpath', '--format=', '--help', '--version')
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--max-size=', '--max-count=', '--prune=', '--until-free=', '--all', '--json', '--help', '--version')
         'restore' = @('-f', '--force', '--conflict=', '--to=', '--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--sort=', '--cwd-only', '--directory=', '--name=', '--glob=', '--regex=', '-m', '--match=', '--latest', '--all', '-n', '--dry-run', '--json', '--plain', '--newest-first', '--oldest-first', '--batch=', '--no-space-check', '--help', '--version')

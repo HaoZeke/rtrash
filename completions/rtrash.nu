@@ -127,6 +127,7 @@ export extern "rtrash put" [
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});
     --files-from: string  # also trash the paths in FILE, one per line (- is stdin)
+    --files0-from: string  # NUL-separated paths, as find -print0 writes them
     --zero(-0)  # separate --files-from paths with NUL (find -print0)
     --help  # display this help and exit
     --version  # output version information and exit
@@ -480,6 +481,7 @@ export extern "trash-put" [
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});
     --files-from: string  # also trash the paths in FILE, one per line (- is stdin)
+    --files0-from: string  # NUL-separated paths, as find -print0 writes them
     --zero(-0)  # separate --files-from paths with NUL (find -print0)
     --help  # display this help and exit
     --version  # output version information and exit

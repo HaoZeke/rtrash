@@ -132,8 +132,8 @@ impl Default for Opts {
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [FILE]...
 Move FILE(s) to the freedesktop.org trash. Accepts rm(1) flags.
-On a TTY with no FILE operands, opens the interactive put browser. Use --plain
-to require CLI operands even on a TTY.
+On a TTY with no FILE operands and no --files-from, opens the interactive
+put browser. Use --plain to require CLI operands even on a TTY.
 
   -f, --force           ignore nonexistent files and arguments, never prompt
   -i                    prompt before every removal
@@ -177,10 +177,16 @@ to require CLI operands even on a TTY.
       --json            print a JSON summary on stdout ({trashed, failed});
                           implies --plain and replaces -v output
       --files-from=FILE also trash the paths in FILE, one per line (- is
-                          stdin). Blank lines are skipped. Paths on the
-                          command line go first
+                          stdin). Blank lines are skipped and a trailing
+                          CR is ignored, so a CRLF list works. Paths on
+                          the command line go first. An empty list does
+                          not open the put browser. - and a prompt both
+                          read stdin, which is an error
+      --files0-from=FILE  NUL-separated paths, as find -print0 writes
+                          them; the same as --files-from with -0
   -0, --zero            separate --files-from paths with NUL, as find
-                          -print0 writes them; an error on its own
+                          -print0 writes them. -0 clusters with other
+                          short options. An error on its own
       --help            display this help and exit
       --version         output version information and exit
 
@@ -192,6 +198,14 @@ fn usage_err(prog: &str, msg: &str) -> i32 {
     eprintln!("{prog}: {msg}");
     eprintln!("Try '{prog} --help' for more information.");
     2
+}
+
+/// Whether an empty operand list opens the put browser.
+/// `--files-from` counts even when the file listed nothing, so that run
+/// is a missing operand. `--plain`, `--json` and a non-terminal stdin
+/// stay on the command line too.
+pub(crate) fn browse_empty(listed: bool, plain: bool, json: bool, tty: bool) -> bool {
+    !listed && !plain && !json && tty
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
@@ -322,6 +336,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                             opts.force = false;
                             opts.interactive = Interactive::Once;
                         }
+                        '0' => from_list.set_nul(),
                         other => {
                             return usage_err(prog, &format!("invalid option -- '{other}'"));
                         }
@@ -330,6 +345,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
         i += 1;
+    }
+
+    if let Some(msg) =
+        from_list.refuse_stdin_prompt(opts.inspect || opts.interactive != Interactive::Never)
+    {
+        return usage_err(prog, msg);
     }
 
     match from_list.load() {
@@ -345,12 +366,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     opts.in_use = in_use.unwrap_or_else(|| InUse::from_env(prog));
 
     if files.is_empty() {
+        let browse = browse_empty(listed, plain, json, crate::util::stdin_is_tty());
         #[cfg(feature = "tui")]
-        if !listed && !plain && !json && crate::util::stdin_is_tty() {
+        if browse {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             return crate::put_tui::run(prog, &cwd, opts.allow_cross_device);
         }
-        let _ = (plain, listed);
+        #[cfg(not(feature = "tui"))]
+        let _ = browse;
         if opts.force {
             if json {
                 println!("{}", summary_json(&[], 0));
@@ -1543,5 +1566,22 @@ mod warn_size_tests {
         assert!(WarnSize::Percent(10).exceeded(11, 100));
         assert!(!WarnSize::Percent(10).exceeded(10, 100));
         assert!(!WarnSize::Percent(10).exceeded(10, 0));
+    }
+}
+
+#[cfg(test)]
+mod browse_tests {
+    use super::browse_empty;
+
+    #[test]
+    fn an_empty_files_from_does_not_open_the_browser() {
+        assert!(
+            !browse_empty(true, false, false, true),
+            "a list was given, even an empty one"
+        );
+        assert!(browse_empty(false, false, false, true));
+        assert!(!browse_empty(false, true, false, true));
+        assert!(!browse_empty(false, false, true, true));
+        assert!(!browse_empty(false, false, false, false));
     }
 }
