@@ -7473,23 +7473,11 @@ proc /proc proc rw 0 0
         }
     }
 
-    /// Hold `RTRASH_SKIP_LOG` at `log` for `body`. The two proofs below
-    /// share the variable, so they take it one at a time.
+    /// Point this thread's skip notes at `log`. The process environment
+    /// is left alone, so another thread's skip still reaches
+    /// `RTRASH_SKIP_LOG`.
     fn with_skip_log<T>(log: &Path, body: impl FnOnce() -> T) -> T {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var_os("RTRASH_SKIP_LOG");
-        std::env::set_var("RTRASH_SKIP_LOG", log);
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(v) => std::env::set_var("RTRASH_SKIP_LOG", v),
-                    None => std::env::remove_var("RTRASH_SKIP_LOG"),
-                }
-            }
-        }
-        let _restore = Restore(old);
+        let _guard = crate::test_skip::override_log(log);
         body()
     }
 
@@ -7541,8 +7529,8 @@ proc /proc proc rw 0 0
         let _ = fs::remove_file(&log);
     }
 
-    /// A forced other inode takes the skip, including the line CI reads
-    /// from `RTRASH_SKIP_LOG` when stderr is captured.
+    /// A forced other inode takes the skip. The note is recorded on this
+    /// thread's log, which stderr capture does not hide.
     #[test]
     fn a_forced_non_reuse_skips_and_writes_the_skip_log() {
         let log = std::env::temp_dir().join(format!("rtrash-skiplog-other-{}", std::process::id()));
@@ -7560,6 +7548,98 @@ proc /proc proc rw 0 0
             "{written}"
         );
         let _ = fs::remove_file(&log);
+    }
+
+    /// The real skip writes the process `RTRASH_SKIP_LOG` while both proof
+    /// tests run on other threads. Their notes must not steal that file.
+    /// The variable is the one CI sets for the suite; this test never
+    /// assigns it.
+    #[test]
+    fn a_real_skip_reaches_the_process_log_beside_the_proofs() {
+        let real_log = std::env::var_os("RTRASH_SKIP_LOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                panic!("RTRASH_SKIP_LOG is unset; the real skip has no process log");
+            });
+        let pid = std::process::id();
+        let real_name = format!("real-inode-skip-{pid}");
+        let miss_log = std::env::temp_dir().join(format!("rtrash-skiplog-race-miss-{pid}"));
+        let other_log = std::env::temp_dir().join(format!("rtrash-skiplog-race-other-{pid}"));
+        let _ = fs::remove_file(&miss_log);
+        let _ = fs::remove_file(&other_log);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let real = {
+            let start = std::sync::Arc::clone(&start);
+            let name = real_name.clone();
+            std::thread::Builder::new()
+                .name(name)
+                .spawn(move || {
+                    start.wait();
+                    let _flag = Flag::raise(&FORCE_OTHER_INODE);
+                    reuse_tries("reuse-race-real");
+                })
+                .unwrap()
+        };
+        let miss = {
+            let start = std::sync::Arc::clone(&start);
+            let miss_log = miss_log.clone();
+            std::thread::Builder::new()
+                .name(format!("race-miss-skip-{pid}"))
+                .spawn(move || {
+                    start.wait();
+                    let _flag = Flag::raise(&FORCE_MISSING_REPLACEMENT);
+                    let caught = with_skip_log(&miss_log, || {
+                        std::panic::catch_unwind(|| reuse_tries("reuse-race-miss"))
+                    });
+                    let msg =
+                        panic_text(caught.expect_err("a missing replacement skipped or passed"));
+                    assert!(msg.contains("is missing"), "{msg}");
+                    let written = fs::read_to_string(&miss_log).unwrap_or_default();
+                    assert!(
+                        !written.contains("race-miss-skip"),
+                        "a missing replacement was recorded as a skip: {written}"
+                    );
+                })
+                .unwrap()
+        };
+        let other = {
+            let start = std::sync::Arc::clone(&start);
+            let other_log = other_log.clone();
+            std::thread::Builder::new()
+                .name(format!("race-other-skip-{pid}"))
+                .spawn(move || {
+                    start.wait();
+                    let _flag = Flag::raise(&FORCE_OTHER_INODE);
+                    with_skip_log(&other_log, || reuse_tries("reuse-race-other"));
+                    let written = fs::read_to_string(&other_log).unwrap_or_default();
+                    assert!(
+                        written.contains("race-other-skip") && written.contains("skipping"),
+                        "{written}"
+                    );
+                })
+                .unwrap()
+        };
+        real.join().unwrap();
+        miss.join().unwrap();
+        other.join().unwrap();
+        let miss_written = fs::read_to_string(&miss_log).unwrap_or_default();
+        let other_written = fs::read_to_string(&other_log).unwrap_or_default();
+        assert!(
+            !miss_written.contains(&real_name) && !other_written.contains(&real_name),
+            "the real skip was written to a proof log"
+        );
+        let _ = fs::remove_file(&miss_log);
+        let _ = fs::remove_file(&other_log);
+        let written = fs::read_to_string(&real_log).unwrap_or_default();
+        assert!(
+            written.contains(&real_name),
+            "real skip missing from the process log: {written}"
+        );
+        assert!(
+            !written.contains(&format!("race-miss-skip-{pid}"))
+                && !written.contains(&format!("race-other-skip-{pid}")),
+            "a proof note landed in the process log: {written}"
+        );
     }
 
     fn reuse_tries(tag: &str) {
