@@ -63,21 +63,32 @@ pub fn list_dir_rows(dir: &Path) -> io::Result<Vec<PathRow>> {
     Ok(rows)
 }
 
-pub fn filter_indices(rows: &[PathRow], query: &str) -> Vec<usize> {
-    let hays: Vec<String> = rows
-        .iter()
-        .map(|r| match &r.label {
-            Some(l) => l.clone(),
-            None => r
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-        })
-        .collect();
+/// Fuzzy-rank cached file-name or label haystacks. An empty query keeps
+/// original order and allocates no path `String`.
+pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
+    tui_fuzzy::rank_indices(hays, query)
+}
+
+fn hay_of(row: &PathRow) -> String {
+    match &row.label {
+        Some(l) => l.clone(),
+        None => row
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
+/// Rank `hays` without cloning a path per row. An empty query skips the
+/// pointer list as well.
+fn rank_hays(hays: &[String], query: &str) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return (0..hays.len()).collect();
+    }
     let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
-    tui_fuzzy::rank_indices(&refs, query)
+    filter_indices(&refs, query)
 }
 
 /// Put selected paths using default recursive-for-dirs opts. Returns exit code.
@@ -121,6 +132,8 @@ struct App {
     /// Fixed list (from `run_rows`): prune after put instead of re-listing.
     fixed: bool,
     rows: Vec<PathRow>,
+    /// Cached file-name or label strings; one per `rows` entry.
+    hays: Vec<String>,
     filtered: Vec<usize>,
     list_state: ListState,
     sel: Selection,
@@ -149,11 +162,13 @@ impl App {
             keys.display_chords(Action::ToggleRecursive),
             keys.display_chords(Action::ToggleForce)
         );
+        let hays = rows.iter().map(hay_of).collect();
         let mut app = Self {
             prog: prog.to_string(),
             cwd,
             fixed: false,
             rows,
+            hays,
             filtered: (0..n).collect(),
             list_state,
             sel: Selection::new(),
@@ -177,9 +192,19 @@ impl App {
         self.refilter_query(&q);
     }
 
+    fn adopt_rows(&mut self, rows: Vec<PathRow>) {
+        self.hays = rows.iter().map(hay_of).collect();
+        self.rows = rows;
+    }
+
+    fn sync_hays(&mut self) {
+        self.hays = self.rows.iter().map(hay_of).collect();
+    }
+
     fn refilter_query(&mut self, query: &str) {
+        debug_assert_eq!(self.hays.len(), self.rows.len());
         let prev = self.selected_idx();
-        self.filtered = filter_indices(&self.rows, query);
+        self.filtered = rank_hays(&self.hays, query);
         let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
         self.ensure_scroll();
@@ -269,10 +294,11 @@ impl App {
         });
         if self.fixed {
             prune_missing(&mut self.rows);
+            self.sync_hays();
             self.sel.clear();
             self.refilter();
         } else if let Ok(rows) = list_dir_rows(&self.cwd) {
-            self.rows = rows;
+            self.adopt_rows(rows);
             self.sel.clear();
             self.refilter();
         }
@@ -433,30 +459,39 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title("put")),
         chunks[0],
     );
-    let items: Vec<ListItem> = app
-        .filtered
+    let (start, end) = tui_list::viewport_range(
+        app.list_state.offset(),
+        app.filtered.len(),
+        app.viewport_rows,
+    );
+    let items: Vec<ListItem> = app.filtered[start..end]
         .iter()
         .map(|&ei| {
             let r = &app.rows[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
             let kind = if r.is_dir { "/" } else { " " };
             let warn = if r.warn { "!" } else { " " };
-            match &r.label {
-                Some(l) => ListItem::new(format!("{mark}{warn}{l}{kind}")),
-                None => {
-                    let name = r.path.file_name().unwrap_or_default().to_string_lossy();
-                    ListItem::new(format!("{mark} {name}{kind}"))
-                }
+            let hay = &app.hays[ei];
+            if r.label.is_some() {
+                ListItem::new(format!("{mark}{warn}{hay}{kind}"))
+            } else {
+                ListItem::new(format!("{mark} {hay}{kind}"))
             }
         })
         .collect();
+    let mut view_state = ListState::default();
+    view_state.select(tui_list::viewport_selected(
+        app.list_state.selected(),
+        start,
+        end,
+    ));
     f.render_stateful_widget(
         List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" paths "))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
             .highlight_symbol("▸ "),
         chunks[1],
-        &mut app.list_state,
+        &mut view_state,
     );
     let extra = format!(
         "{} recursive · {} force",
@@ -595,7 +630,9 @@ mod fixed_rows_tests {
                 warn: true,
             },
         ];
-        assert_eq!(filter_indices(&rows, "cargo"), vec![0]);
+        let owned: Vec<String> = rows.iter().map(hay_of).collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(filter_indices(&refs, "cargo"), vec![0]);
         prune_missing(&mut rows);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, kept);
@@ -655,5 +692,88 @@ mod tests {
             "{}",
             app.status
         );
+    }
+
+    /// A fixed list drops rows that the put removed or that were already
+    /// gone, and the cached names follow that list.
+    #[test]
+    fn a_fixed_put_drops_cached_names_with_their_rows() {
+        let base = std::env::temp_dir().join(format!("rtrash-put-hay-{}", std::process::id()));
+        let rows = vec![
+            PathRow {
+                path: base.join("a"),
+                is_dir: false,
+                label: Some("alpha-row".into()),
+                warn: false,
+            },
+            PathRow {
+                path: base.join("b"),
+                is_dir: false,
+                label: Some("beta-row".into()),
+                warn: false,
+            },
+        ];
+        let mut app = App::new("rtrash", base.clone(), rows);
+        app.fixed = true;
+        app.do_put();
+        assert!(app.rows.is_empty(), "rows left: {}", app.rows.len());
+        assert!(app.hays.is_empty(), "cached names left: {:?}", app.hays);
+        assert!(app.filtered.is_empty(), "filter left: {:?}", app.filtered);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// After a put, a directory listing replaces both the rows and the
+    /// names the filter ranks.
+    #[test]
+    fn a_relist_replaces_the_cached_names() {
+        let dir = std::env::temp_dir().join(format!("rtrash-put-relist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("listed"), b"x").unwrap();
+        let rows = vec![PathRow {
+            path: dir.join("missing"),
+            is_dir: false,
+            label: Some("stale".into()),
+            warn: false,
+        }];
+        let mut app = App::new("rtrash", dir.clone(), rows);
+        app.do_put();
+        assert_eq!(app.hays, ["listed"]);
+        assert!(!app.hays.iter().any(|h| h == "stale"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scrolled_list_draws_only_its_viewport() {
+        let rows: Vec<PathRow> = (0..30)
+            .map(|i| PathRow {
+                path: PathBuf::from(format!("/tmp/row-{i:02}")),
+                is_dir: false,
+                label: None,
+                warn: false,
+            })
+            .collect();
+        let mut app = App::new("rtrash", PathBuf::from("/tmp"), rows);
+        app.list_state.select(Some(app.filtered.len() - 1));
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("row-29"), "{text}");
+        assert!(text.contains("row-27"), "{text}");
+        assert!(!text.contains("row-00"), "{text}");
+        assert_eq!(app.list_state.selected(), Some(29));
+        let selected = text.lines().find(|l| l.contains("row-29")).unwrap();
+        assert!(selected.contains('▸'), "{selected}");
+    }
+
+    #[test]
+    fn a_labeled_row_draws_its_cached_label() {
+        let rows = vec![PathRow {
+            path: PathBuf::from("/x/named"),
+            is_dir: false,
+            label: Some("pretty".into()),
+            warn: true,
+        }];
+        let mut app = App::new("rtrash", PathBuf::from("/x"), rows);
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("[ ]!pretty"), "{text}");
     }
 }

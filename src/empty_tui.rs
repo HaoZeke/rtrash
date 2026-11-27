@@ -18,13 +18,24 @@ use crate::tui_list;
 use crate::tui_select::Selection;
 use crate::tui_term;
 
-pub fn filter_indices(entries: &[&Entry], query: &str) -> Vec<usize> {
-    let hays: Vec<String> = entries
-        .iter()
-        .map(|e| e.original.to_string_lossy().into_owned())
-        .collect();
+/// Fuzzy-rank cached original-path haystacks. An empty query keeps
+/// original order and allocates no path `String`.
+pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
+    tui_fuzzy::rank_indices(hays, query)
+}
+
+fn hay_of(entry: &Entry) -> String {
+    entry.original.to_string_lossy().into_owned()
+}
+
+/// Rank `hays` without cloning a path per row. An empty query skips the
+/// pointer list as well.
+fn rank_hays(hays: &[String], query: &str) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return (0..hays.len()).collect();
+    }
     let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
-    tui_fuzzy::rank_indices(&refs, query)
+    filter_indices(&refs, query)
 }
 
 /// Result of a permanent-remove batch: per-input success flags + dry-run bytes.
@@ -153,6 +164,8 @@ enum Mode {
 struct App<'a> {
     prog: &'a str,
     entries: Vec<&'a Entry>,
+    /// Cached original-path display strings; one per `entries` row.
+    hays: Vec<String>,
     /// Per entry, whether its payload is gone (one stat each, at start).
     gone: Vec<bool>,
     filtered: Vec<usize>,
@@ -180,10 +193,12 @@ impl<'a> App<'a> {
         let n = entries.len();
         let keys = Keymap::load();
         let dry_hint = format!("{} dry-run", keys.display_chords(Action::ToggleDryRun));
+        let hays = entries.iter().copied().map(hay_of).collect();
         let gone = entries.iter().map(|e| e.missing()).collect();
         let mut app = Self {
             prog,
             entries,
+            hays,
             gone,
             filtered: (0..n).collect(),
             list_state,
@@ -207,9 +222,20 @@ impl<'a> App<'a> {
         self.refilter_query(&q);
     }
 
+    /// Drop one row and the cached path and gone mark that belong to it.
+    fn remove_at(&mut self, ei: usize) {
+        debug_assert_eq!(self.hays.len(), self.entries.len());
+        debug_assert_eq!(self.gone.len(), self.entries.len());
+        self.entries.remove(ei);
+        self.hays.remove(ei);
+        self.gone.remove(ei);
+    }
+
     fn refilter_query(&mut self, query: &str) {
+        debug_assert_eq!(self.hays.len(), self.entries.len());
+        debug_assert_eq!(self.gone.len(), self.entries.len());
         let prev = self.selected_entry_idx();
-        self.filtered = filter_indices(&self.entries, query);
+        self.filtered = rank_hays(&self.hays, query);
         let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
         self.ensure_scroll();
@@ -289,7 +315,7 @@ impl<'a> App<'a> {
             removed_entry_idxs.sort_unstable();
             for &ei in removed_entry_idxs.iter().rev() {
                 if ei < self.entries.len() {
-                    self.entries.remove(ei);
+                    self.remove_at(ei);
                 }
             }
             self.sel.remap_after_removals(&removed_entry_idxs);
@@ -450,8 +476,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .block(Block::default().borders(Borders::ALL).title("empty")),
         chunks[0],
     );
-    let items: Vec<ListItem> = app
-        .filtered
+    let (start, end) = tui_list::viewport_range(
+        app.list_state.offset(),
+        app.filtered.len(),
+        app.viewport_rows,
+    );
+    let items: Vec<ListItem> = app.filtered[start..end]
         .iter()
         .map(|&ei| {
             let e = app.entries[ei];
@@ -464,10 +494,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
             ListItem::new(format!(
                 "{mark} {}  {}{gone}",
                 e.date.as_deref().unwrap_or("?"),
-                e.original.display()
+                app.hays[ei]
             ))
         })
         .collect();
+    let mut view_state = ListState::default();
+    view_state.select(tui_list::viewport_selected(
+        app.list_state.selected(),
+        start,
+        end,
+    ));
     f.render_stateful_widget(
         List::new(items)
             .block(
@@ -478,7 +514,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
             .highlight_symbol("▸ "),
         chunks[1],
-        &mut app.list_state,
+        &mut view_state,
     );
     let dry_hint = format!("{} dry-run", app.keys.display_chords(Action::ToggleDryRun));
     let keys = match app.mode {
@@ -733,6 +769,95 @@ mod tests {
         );
         assert_eq!(app.said.len(), 1);
         assert!(record.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_query_ranks_cached_haystacks_in_order() {
+        let owned: Vec<String> = (0..5000).map(|i| format!("/tmp/file-{i}.txt")).collect();
+        let all = rank_hays(&owned, "  ");
+        assert_eq!(all.len(), 5000);
+        assert_eq!((all[0], all[4999]), (0, 4999));
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let ranked = filter_indices(&refs, "file-1");
+        assert!(!ranked.is_empty());
+        assert!(
+            ranked
+                .iter()
+                .all(|&i| tui_fuzzy::fuzzy_score(refs[i], "file-1").is_some()),
+            "a keystroke ranks the cached haystacks"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_list_draws_only_its_viewport() {
+        let entries: Vec<Entry> = (0..30)
+            .map(|i| Entry {
+                date: None,
+                epoch: 0,
+                original: PathBuf::from(format!("/tmp/row-{i:02}")),
+                name: "n".into(),
+                dir: TrashDir {
+                    root: PathBuf::from("/tmp/trash"),
+                    topdir: None,
+                },
+                batch: None,
+                recorded: true,
+                payload: None,
+            })
+            .collect();
+        let refs: Vec<&Entry> = entries.iter().collect();
+        let mut app = App::new("rtrash", refs, false);
+        app.list_state.select(Some(app.filtered.len() - 1));
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("row-29"), "{text}");
+        assert!(text.contains("row-27"), "{text}");
+        assert!(!text.contains("row-00"), "{text}");
+        assert_eq!(app.list_state.selected(), Some(29));
+        let selected = text.lines().find(|l| l.contains("row-29")).unwrap();
+        assert!(selected.contains('▸'), "{selected}");
+    }
+
+    /// A purge that removes one row drops that row's cached path too.
+    #[test]
+    fn a_purge_drops_the_cached_path_with_its_row() {
+        let root = std::env::temp_dir().join(format!("rtrash-tui-hay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("info")).unwrap();
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        std::fs::write(root.join("files/a"), "a").unwrap();
+        std::fs::write(root.join("files/b"), "b").unwrap();
+        std::fs::write(root.join("info/a.trashinfo"), "[Trash Info]\nPath=/left\n").unwrap();
+        std::fs::write(root.join("info/b.trashinfo"), "[Trash Info]\nPath=/right\n").unwrap();
+        let dir = TrashDir::from_root(&root).unwrap();
+        let left = Entry {
+            date: None,
+            epoch: 0,
+            original: PathBuf::from("/left"),
+            name: "a".into(),
+            dir: dir.clone(),
+            batch: None,
+            recorded: true,
+            payload: None,
+        };
+        let right = Entry {
+            date: None,
+            epoch: 0,
+            original: PathBuf::from("/right"),
+            name: "b".into(),
+            dir: dir.clone(),
+            batch: None,
+            recorded: true,
+            payload: None,
+        };
+        let mut app = App::new("rtrash", vec![&left, &right], false);
+        assert_eq!(app.hays, ["/left", "/right"]);
+        app.do_purge();
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.hays, ["/right"]);
+        assert_eq!(app.gone.len(), 1);
+        assert!(root.join("files/b").exists());
+        assert!(!root.join("files/a").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
