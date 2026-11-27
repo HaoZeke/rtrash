@@ -3825,14 +3825,18 @@ def check_manual_contains():
 # first, so a bare `empty` in one test cannot clear the volume trash of a
 # mount another test just made (round 277). Past the sandbox means: a
 # mount (`Binds(`, a "mount" argument), a look at a real mount's top
-# (`mount_top(`), a bare `["empty"]`, or a put across devices that pins
-# no trash folder (`other_device_dir(` and no pin string in the test). Only #[test] fns are checked; the helpers are not tests.
+# (`mount_top(`), a walk of `mount_points()` (the HUD plants a
+# `.Trash-$uid` on one), a bare `["empty"]`, or a put across devices that
+# pins no trash folder (`other_device_dir(` and no pin string in the
+# test). Only #[test] fns are checked; the helpers are not tests. The
+# scan covers tests/*.rs and crates/*/tests/*.rs.
 # The windows_* and wsl_* files are left out: windows_* reach only the
 # scratch Recycle Bin of RTRASH_TEST_BIN_DIR, and wsl_* run `rtrash wsl`
 # on a made-up drive tree, never a volume trash.
 GLOBAL_STATE_NEEDS = [
     ("a mount", re.compile(r'Binds\(|"mount"')),
     ("a real mount's top", re.compile(r"\bmount_top\(")),
+    ("a real mount's trash", re.compile(r"\bmount_points\(")),
     ("a bare empty", re.compile(r'\[\s*"empty"\s*\]')),
 ]
 GLOBAL_STATE_CASES = [
@@ -3847,6 +3851,9 @@ GLOBAL_STATE_CASES = [
     ("xdev pinned", '#[test]\nfn t() {\n    let o = other_device_dir(&r, "x");\n'
      '    let pin = format!("--trash-dir={}", o.display());\n}\n', []),
     ("mount top", '#[test]\nfn t() {\n    let top = mount_top(&f);\n}\n', ["t"]),
+    ("mount points", '#[test]\nfn t() {\n    for mp in mount_points() {}\n}\n', ["t"]),
+    ("mount points held", '#[test]\nfn t() {\n    let _global = global_state();\n'
+     '    for mp in mount_points() {}\n}\n', []),
     ("helper", 'fn as_root(a: &[&str]) {\n    Command::new("mount");\n}\n', []),
     ("comment", '#[test]\nfn t() {\n    // sb.run(&["empty"]);\n}\n', []),
 ]
@@ -3871,21 +3878,25 @@ def global_state_misses(text):
 
 
 def check_global_state():
-    """Every test that mounts, looks at a real mount's top, puts across
-    devices unpinned or runs a bare `empty` takes global_state(), and the
+    """Every test that mounts, looks at a real mount's top, walks
+    mount_points(), puts across devices unpinned or runs a bare `empty`
+    takes global_state(), in tests/*.rs and crates/*/tests/*.rs, and the
     matcher meets every GLOBAL_STATE_CASES case."""
     for what, text, want in GLOBAL_STATE_CASES:
         if global_state_misses(text) != want:
             errors.append(f"scripts/precheck.py: global_state_misses gets GLOBAL_STATE_CASES "
                           f"'{what}' wrong; the global-state check is broken")
-    for path in sorted((ROOT / "tests").glob("*.rs")):
+    paths = sorted((ROOT / "tests").glob("*.rs"))
+    paths += sorted((ROOT / "crates").glob("*/tests/*.rs"))
+    for path in paths:
         rel = path.relative_to(ROOT).as_posix()
         if path.name.startswith(("windows_", "wsl_")):
             continue
         for name in global_state_misses(path.read_text(encoding="utf-8")):
             errors.append(f"{rel}: test {name} reaches past its sandbox (a mount, a real "
-                          "mount's top, an unpinned put across devices or a bare empty) "
-                          "without `let _global = global_state();`; tests run in parallel")
+                          "mount's top, a volume trash on a real mount, an unpinned put "
+                          "across devices or a bare empty) without "
+                          "`let _global = global_state();`; tests run in parallel")
 
 
 # cargo test and nextest hide the stderr of a passing test, so a skip
