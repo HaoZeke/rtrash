@@ -1,0 +1,1 @@
+On Windows a `$I` record that is a Compact file, or another data reparse point, is read through its filter, so the bytes are the file. A name surrogate is not read. A record that cannot be read is reported and left in place; `--fix` removes a dangling record, or one that was read and cannot be parsed or is larger than any `$I` record.

@@ -617,9 +617,13 @@ pub enum IndexRead {
     /// Not a record file: a folder, a link or a junction, which Windows
     /// reports as a link and the check as `stray:`. It is not followed.
     NotAFile,
-    /// A record file that cannot be read, is larger than
-    /// [`I_RECORD_CAP`] or cannot be parsed, and why (`bad record:`).
+    /// A record file that is larger than [`I_RECORD_CAP`] or cannot be
+    /// parsed, and why (`bad record:`). A file that cannot be read is
+    /// [`IndexRead::Unread`]: it is not a record `--fix` removes.
     Bad(String),
+    /// The file could not be read. It stays, so a filter or a permission
+    /// failure is not taken for a corrupt record.
+    Unread(String),
 }
 
 /// Read the `$I` name `record` as [`IndexRead`] says. Only a regular
@@ -631,8 +635,9 @@ pub fn read_bin_index(record: &Path) -> IndexRead {
         return IndexRead::NotAFile;
     }
     let body = match read_index(record) {
-        Ok(b) => b,
-        Err(why) => return IndexRead::Bad(why),
+        IndexLoad::Bytes(b) => b,
+        IndexLoad::Unread(why) => return IndexRead::Unread(why),
+        IndexLoad::TooBig => return IndexRead::Bad("larger than any $I record".to_string()),
     };
     match parse_recycle_i(&body) {
         Some(meta) => IndexRead::Record(meta),
@@ -645,8 +650,10 @@ pub fn read_bin_index(record: &Path) -> IndexRead {
 pub enum BinProblem {
     /// A `$I` record whose `$R` payload is gone; the original path it names.
     Dangling { record: PathBuf, origin: PathBuf },
-    /// A `$I` record that cannot be read or parsed, and why.
+    /// A `$I` record that was read and cannot be parsed, or is too big, and why.
     BadRecord { record: PathBuf, why: String },
+    /// A `$I` file that cannot be read. `--fix` leaves it.
+    Unread { record: PathBuf, why: String },
     /// A `$R` payload with no `$I` record.
     Orphan { payload: PathBuf },
     /// A `$I` name that is a folder or a link, not a record file.
@@ -673,6 +680,9 @@ impl BinProblem {
                 format!("dangling: {} (the payload is gone)", t(record))
             }
             BinProblem::BadRecord { record, why } => format!("bad record: {}: {why}", t(record)),
+            BinProblem::Unread { record, why } => {
+                format!("unreadable: {} (kept; {why})", t(record))
+            }
             BinProblem::Orphan { payload } => format!(
                 "orphan: {} (kept; with no record, list and rm do not show it)",
                 t(payload)
@@ -684,18 +694,32 @@ impl BinProblem {
     }
 }
 
+/// What [`read_index`] got from a `$I` file.
+enum IndexLoad {
+    Bytes(Vec<u8>),
+    /// The open or the read failed. Not a parse failure.
+    Unread(String),
+    TooBig,
+}
+
 /// Read a `$I` record, refusing one larger than [`I_RECORD_CAP`].
-/// A symlink is not a record: the open does not follow it.
-fn read_index(path: &Path) -> Result<Vec<u8>, String> {
+/// A symlink is not a record: the open does not follow it. A data
+/// reparse point is read through its filter, by [`open_regular_nofollow`].
+fn read_index(path: &Path) -> IndexLoad {
     use std::io::Read;
+    let unread = |e: std::io::Error| IndexLoad::Unread(format!("cannot be read ({e})"));
     let mut body = Vec::new();
-    crate::util::open_regular_nofollow(path)
-        .and_then(|f| f.take(I_RECORD_CAP + 1).read_to_end(&mut body))
-        .map_err(|e| format!("cannot be read ({e})"))?;
-    if body.len() as u64 > I_RECORD_CAP {
-        return Err("larger than any $I record".to_string());
+    let mut file = match crate::util::open_regular_nofollow(path) {
+        Ok(f) => f,
+        Err(e) => return unread(e),
+    };
+    if let Err(e) = file.by_ref().take(I_RECORD_CAP + 1).read_to_end(&mut body) {
+        return unread(e);
     }
-    Ok(body)
+    if body.len() as u64 > I_RECORD_CAP {
+        return IndexLoad::TooBig;
+    }
+    IndexLoad::Bytes(body)
 }
 
 /// The problems in one user's Recycle Bin folder (`X:\$Recycle.Bin\SID`):
@@ -728,6 +752,10 @@ pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
                 out.push(BinProblem::BadRecord { record, why });
                 continue;
             }
+            IndexRead::Unread(why) => {
+                out.push(BinProblem::Unread { record, why });
+                continue;
+            }
         };
         if std::fs::symlink_metadata(at(&format!("$R{rest}"))).is_err() {
             out.push(BinProblem::Dangling {
@@ -749,7 +777,8 @@ pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
 
 /// `status --check`, and `--fix` with or without `-n`, over the Recycle
 /// Bin folders `dirs`, as [`crate::trash_check`] does for FreeDesktop
-/// trashes. `--fix` removes dangling and bad `$I` records only, through
+/// trashes. `--fix` removes dangling and bad `$I` records only. A record
+/// that cannot be read is reported and kept. Removals go through
 /// [`crate::permanent_guard::remove`]: `RTRASH_NO_PERMANENT` refuses it,
 /// `RTRASH_MAX_PERMANENT` caps it before the first removal, and with
 /// `RTRASH_ALLOW_ROOTS` set a dangling record must name a path under a
@@ -7039,6 +7068,21 @@ mod tests {
                  `rtrash status --check` shows them"
             )
         );
+    }
+
+    /// A record that cannot be read is named and kept. `--fix` removes
+    /// only a dangling record or one that was read and cannot be parsed.
+    #[test]
+    fn an_unreadable_record_is_kept() {
+        let problem = BinProblem::Unread {
+            record: PathBuf::from("$IUNREAD"),
+            why: "cannot be read (os error 5)".into(),
+        };
+        assert!(problem.fix_target().is_none());
+        let line = problem.line();
+        assert!(line.starts_with("unreadable:"), "{line}");
+        assert!(line.contains("kept"), "{line}");
+        assert!(line.contains("cannot be read"), "{line}");
     }
 
     /// `read_bin_index` takes what the check takes: a record file that

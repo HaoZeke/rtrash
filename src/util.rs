@@ -1086,11 +1086,33 @@ pub fn is_missing(e: &io::Error) -> bool {
     )
 }
 
+/// The parenthetical a status row adds when a trash has orphans or
+/// records whose payload is gone. Empty when it has neither.
+/// `rtrash-hud` prints the same words. This crate's status module is
+/// Unix-only, so on Windows the HUD is the caller.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn status_notes(orphans: u64, dangling: u64) -> String {
+    let mut parts = Vec::new();
+    if orphans > 0 {
+        parts.push(format!("{orphans} without .trashinfo"));
+    }
+    if dangling > 0 {
+        parts.push(format!("{dangling} without a payload"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
+
 /// Open `path` for reading only when it is a regular file. A symlink is
 /// refused from an lstat, and the open itself does not follow one that
-/// appears in its place (`O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT`
-/// on Windows). Cache and record reads use this so a planted link cannot
-/// be read as `directorysizes` or a `.trashinfo`.
+/// appears in its place (`O_NOFOLLOW` on Unix,
+/// `FILE_FLAG_OPEN_REPARSE_POINT` on Windows). A Windows data reparse
+/// point, such as a Compact file, is opened again without that flag so
+/// the filter supplies the file bytes. Cache and record reads use this
+/// so a planted link cannot be read as `directorysizes` or a `.trashinfo`.
 pub(crate) fn open_regular_nofollow(path: &std::path::Path) -> io::Result<std::fs::File> {
     let not_regular = || io::Error::new(io::ErrorKind::InvalidData, "not a regular file");
     let meta = std::fs::symlink_metadata(path)?;
@@ -1102,6 +1124,15 @@ pub(crate) fn open_regular_nofollow(path: &std::path::Path) -> io::Result<std::f
         return Err(not_regular());
     }
     Ok(file)
+}
+
+/// `winnt.h` `IsReparseTagNameSurrogate`: the tag names another file
+/// (a symlink, a junction, a mount point) rather than holding this
+/// file's data (Compact / WOF, a cloud placeholder).
+#[cfg(any(windows, test))]
+pub(crate) fn reparse_tag_names_another_file(tag: u32) -> bool {
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+    tag & NAME_SURROGATE != 0
 }
 
 fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
@@ -1117,11 +1148,53 @@ fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
+            .open(path)?;
+        // The flag above skips filters. A name surrogate is not file
+        // data and is not read. A data tag is reopened without the flag
+        // so the filter supplies the bytes. A plain file keeps this
+        // handle, so a symlink raced in after the lstat is not followed.
+        match reparse_data_tag(&file) {
+            Some(tag) if reparse_tag_names_another_file(tag) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not a regular file",
+            )),
+            Some(_) => std::fs::File::open(path),
+            None => Ok(file),
+        }
     }
+}
+
+/// The reparse tag of a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`,
+/// when the file is a reparse point.
+#[cfg(windows)]
+fn reparse_data_tag(file: &std::fs::File) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO,
+    };
+    let mut info = std::mem::MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::uninit();
+    // SAFETY: the buffer holds exactly one FILE_ATTRIBUTE_TAG_INFO.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileAttributeTagInfo,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: the call succeeded, so it filled `info`.
+    let info = unsafe { info.assume_init() };
+    if info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 || info.ReparseTag == 0 {
+        return None;
+    }
+    Some(info.ReparseTag)
 }
 
 #[cfg(test)]
@@ -1485,6 +1558,17 @@ mod tests {
     fn wtf8_decode_replaces_bytes_no_name_made() {
         assert_eq!(wtf8_decode(&[0xFF, 0x61]), [0xFFFD, 0x61]);
         assert_eq!(wtf8_decode(&[0xE0, 0x80, 0x80]), [0xFFFD, 0xFFFD, 0xFFFD]);
+    }
+
+    /// The open refuses a name-surrogate tag and rereads a data tag.
+    /// A symlink (`0xA000000C`) and a mount point (`0xA0000003`) set the
+    /// name-surrogate bit; Compact / WOF (`0x80000017`) does not.
+    #[test]
+    fn a_name_surrogate_tag_is_not_file_data() {
+        assert!(super::reparse_tag_names_another_file(0xA000_000C));
+        assert!(super::reparse_tag_names_another_file(0xA000_0003));
+        assert!(!super::reparse_tag_names_another_file(0x8000_0017));
+        assert!(!super::reparse_tag_names_another_file(0));
     }
 
     /// A symlink to a regular file is not opened. The target stays as it was.

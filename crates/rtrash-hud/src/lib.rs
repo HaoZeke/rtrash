@@ -175,18 +175,7 @@ fn load(pins: &[PathBuf], home_only: bool) -> Result<Snapshot, String> {
 }
 
 fn notes(row: &RootTotal) -> String {
-    let mut parts = Vec::new();
-    if row.orphans > 0 {
-        parts.push(format!("{} without .trashinfo", row.orphans));
-    }
-    if row.dangling > 0 {
-        parts.push(format!("{} without a payload", row.dangling));
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", parts.join(", "))
-    }
+    rtrash::util::status_notes(row.orphans, row.dangling)
 }
 
 /// The text table, one trash per line, then the total. A trailing newline

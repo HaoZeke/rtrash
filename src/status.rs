@@ -287,18 +287,7 @@ pub fn print_status(
     }
     let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than, size);
     for r in &roots {
-        let mut notes = Vec::new();
-        if r.orphans > 0 {
-            notes.push(format!("{} without .trashinfo", r.orphans));
-        }
-        if r.dangling > 0 {
-            notes.push(format!("{} without a payload", r.dangling));
-        }
-        let orphans = if notes.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", notes.join(", "))
-        };
+        let orphans = crate::util::status_notes(r.orphans, r.dangling);
         println!(
             "{}\t{}{orphans}\t{}",
             r.path,
