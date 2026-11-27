@@ -73,6 +73,13 @@ fn log_path() -> Option<PathBuf> {
 
 /// Parties that must still be inside their log override while this thread's
 /// [`skip`] reads the path and writes the line.
+///
+/// The inode-race proof needs that overlap. Its proof threads wait here
+/// while they still hold their own logs, and the skipping thread counts
+/// as a party too, so the write runs only after everyone has arrived and
+/// the others leave only once the line is written. Without the hold the
+/// proof threads can drop their overrides first, and a process-wide
+/// `RTRASH_SKIP_LOG` can put the real note in a proof log.
 pub struct SkipHold {
     lock: Mutex<Meet>,
     cv: Condvar,
@@ -109,8 +116,8 @@ impl SkipHold {
         drop(guard);
     }
 
-    /// Wait until every party is in [`wait_until_written`], then run `write`
-    /// before letting them leave.
+    /// Count this thread as a party, wait until the others have arrived in
+    /// [`wait_until_written`], run `write`, then let them leave.
     fn during_write(&self, write: impl FnOnce()) {
         let mut guard = self.lock.lock().unwrap();
         guard.here += 1;
