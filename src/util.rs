@@ -1169,6 +1169,7 @@ pub(crate) fn reparse_tag_names_another_file(tag: u32) -> bool {
 /// What a reparse-tag query says about a handle opened with
 /// `FILE_FLAG_OPEN_REPARSE_POINT`.
 #[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug)]
 enum ReparseLook {
     /// The query succeeded and the file is not a reparse point.
     Plain,
@@ -1203,6 +1204,38 @@ fn classify_reparse(query_ok: bool, reparse_attribute: bool, tag: u32) -> Repars
     }
 }
 
+/// What to do with a handle after [`classify_reparse`]. `reopened` is
+/// true once the handle has been opened again without the reparse flag.
+/// A data tag is reopened once; after that, only a plain file is kept.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReparseOpen {
+    /// Keep this handle.
+    Plain,
+    /// Open again from this handle, without the reparse flag.
+    Reopen,
+    /// Do not read this handle. The text is the error.
+    Refuse(&'static str),
+}
+
+/// The open decision for `look`. A name surrogate is refused. A data tag
+/// is reopened once. A tag that cannot be confirmed is refused, and a
+/// reopen that is still a reparse point is refused too.
+#[cfg(any(windows, test))]
+fn reparse_open(look: ReparseLook, reopened: bool) -> ReparseOpen {
+    match (look, reopened) {
+        (ReparseLook::Plain, _) => ReparseOpen::Plain,
+        (ReparseLook::Surrogate, _) => ReparseOpen::Refuse("not a regular file"),
+        (ReparseLook::Data, false) => ReparseOpen::Reopen,
+        (ReparseLook::Unconfirmed, false) => {
+            ReparseOpen::Refuse("reparse tag could not be confirmed")
+        }
+        (ReparseLook::Data | ReparseLook::Unconfirmed, true) => {
+            ReparseOpen::Refuse("reparse data was not read through its filter")
+        }
+    }
+}
+
 fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -1225,17 +1258,10 @@ fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
         // a symlink raced in after the lstat is not followed. A plain
         // file keeps this handle. A tag that cannot be confirmed is an
         // error: reading this handle would return the reparse buffer.
-        match reparse_look(&file) {
-            ReparseLook::Surrogate => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not a regular file",
-            )),
-            ReparseLook::Plain => Ok(file),
-            ReparseLook::Unconfirmed => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "reparse tag could not be confirmed",
-            )),
-            ReparseLook::Data => reopen_without_reparse_flag(file),
+        match reparse_open(reparse_look(&file), false) {
+            ReparseOpen::Plain => Ok(file),
+            ReparseOpen::Reopen => reopen_without_reparse_flag(file),
+            ReparseOpen::Refuse(why) => Err(io::Error::new(io::ErrorKind::InvalidData, why)),
         }
     }
 }
@@ -1333,13 +1359,12 @@ fn reopen_without_reparse_flag(file: std::fs::File) -> io::Result<std::fs::File>
             "reopened file is not the same file",
         ));
     }
-    match reparse_look(&again) {
-        ReparseLook::Plain => Ok(again),
-        ReparseLook::Surrogate => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not a regular file",
-        )),
-        ReparseLook::Data | ReparseLook::Unconfirmed => Err(io::Error::new(
+    match reparse_open(reparse_look(&again), true) {
+        ReparseOpen::Plain => Ok(again),
+        ReparseOpen::Refuse(why) => Err(io::Error::new(io::ErrorKind::InvalidData, why)),
+        // `reparse_open` does not ask for a second reopen. This arm is
+        // the same refusal, so a change there cannot read the buffer.
+        ReparseOpen::Reopen => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "reparse data was not read through its filter",
         )),
@@ -1755,6 +1780,42 @@ mod tests {
         ));
     }
 
+    /// The Windows open keeps a plain file, reopens a data tag once, and
+    /// refuses a surrogate or a tag it cannot confirm. Replacing either
+    /// match in the open with `Ok(file)` would still pass every open
+    /// test on Linux; this is the decision those matches call.
+    #[test]
+    fn a_reparse_open_refuses_reopens_or_keeps_the_handle() {
+        use super::{reparse_open, ReparseLook, ReparseOpen};
+        let refuse = |look, again, why| {
+            assert_eq!(
+                reparse_open(look, again),
+                ReparseOpen::Refuse(why),
+                "{look:?} reopened={again}"
+            );
+        };
+        assert_eq!(reparse_open(ReparseLook::Plain, false), ReparseOpen::Plain);
+        assert_eq!(reparse_open(ReparseLook::Plain, true), ReparseOpen::Plain);
+        assert_eq!(reparse_open(ReparseLook::Data, false), ReparseOpen::Reopen);
+        refuse(ReparseLook::Surrogate, false, "not a regular file");
+        refuse(ReparseLook::Surrogate, true, "not a regular file");
+        refuse(
+            ReparseLook::Unconfirmed,
+            false,
+            "reparse tag could not be confirmed",
+        );
+        refuse(
+            ReparseLook::Data,
+            true,
+            "reparse data was not read through its filter",
+        );
+        refuse(
+            ReparseLook::Unconfirmed,
+            true,
+            "reparse data was not read through its filter",
+        );
+    }
+
     /// Set `key` for this test and put the previous value back, including
     /// when the open panics.
     #[cfg(debug_assertions)]
@@ -1817,7 +1878,11 @@ mod tests {
         std::fs::write(&target, b"secret-target").unwrap();
         let link = dir.join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert!(super::open_regular_nofollow(&link).is_err());
+        let err = super::open_regular_nofollow(&link).unwrap_err();
+        // The lstat refuses the link. Without that check the open's
+        // O_NOFOLLOW fails instead, and the error is not this one.
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "not a regular file");
         assert_eq!(std::fs::read(&target).unwrap(), b"secret-target");
         let file = dir.join("plain");
         std::fs::write(&file, b"plain-bytes").unwrap();
@@ -1848,7 +1913,9 @@ mod tests {
                  privilege or Developer Mode"
             );
         }
-        assert!(super::open_regular_nofollow(&link).is_err());
+        let err = super::open_regular_nofollow(&link).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "not a regular file");
         assert_eq!(std::fs::read(&target).unwrap(), b"secret-target");
         let _ = std::fs::remove_dir_all(&dir);
     }
