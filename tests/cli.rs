@@ -7303,6 +7303,29 @@ fn as_root(args: &[&str]) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Whether a tmpfs can be mounted here. False when `mount` is missing,
+/// `sudo -n` cannot run it, or this process is root and still may not
+/// mount, as in a user namespace.
+#[cfg(target_os = "linux")]
+fn mount_usable() -> bool {
+    let dir = common::scratch_dir("test", "mount-probe");
+    let at = dir.to_str().unwrap();
+    let ok = as_root(&[
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=1m,mode=0700",
+        "tmpfs",
+        at,
+    ]);
+    if ok {
+        let _ = as_root(&["umount", "-l", at]);
+    }
+    let _ = fs::remove_dir(&dir);
+    ok
+}
+
 /// Mounts made with [`as_root`], undone (lazily, the last made first) when
 /// dropped, before the sandbox that holds them goes.
 #[cfg(target_os = "linux")]
@@ -7329,6 +7352,10 @@ fn a_trash_seen_through_two_bind_mounts_counts_once() {
         return;
     }
     let _global = global_state();
+    if !mount_usable() {
+        common::skip("mount is not usable here; skipping");
+        return;
+    }
     let sb = Sandbox::new("bind-twice");
     let vol = sb.root.join("vol");
     let trash = vol.join(format!(".Trash-{}", unsafe { libc::getuid() }));
@@ -7387,6 +7414,10 @@ fn put_and_empty_follow_volumes_mounted_inside_volumes() {
         return;
     }
     let _global = global_state();
+    if !mount_usable() {
+        common::skip("mount is not usable here; skipping");
+        return;
+    }
     let sb = Sandbox::new("nested-mounts");
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let vol = sb.root.join("vol");
@@ -7511,6 +7542,10 @@ fn trashed_links_into_an_unmounted_volume_go_as_links() {
     let _global = global_state();
     if !as_root(&["true"]) {
         common::skip("sudo unavailable; skipping");
+        return;
+    }
+    if !mount_usable() {
+        common::skip("mount is not usable here; skipping");
         return;
     }
     let sb = Sandbox::new("link-unmounted");
@@ -8318,6 +8353,11 @@ impl Drop for Holder {
     }
 }
 
+/// Names the process holding this test's own file. A path nobody holds
+/// is judged from each `who` on its own: one scan's `unreadable` count
+/// does not decide another scan's line, and a short-lived process in
+/// another test does not skip this one. The "run as root" hint is
+/// required only when this process is not root.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn who_names_the_process_holding_a_file_or_its_directory() {
@@ -8349,32 +8389,43 @@ fn who_names_the_process_holding_a_file_or_its_directory() {
     assert!(json.contains(&format!("\"user\":\"{user}\"")), "{json}");
     assert!(json.contains("\"cmdline\":"), "{json}");
     assert!(!json.contains("no process holds"), "{json}");
+    // SAFETY: geteuid has no preconditions.
+    let root = unsafe { libc::geteuid() } == 0;
     let out = sb.run(&["who", "idle.log"]);
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
     let idle = stdout_of(&out);
+    let err = stderr_of(&out);
     assert!(
         idle.contains("idle.log: no process holds this path"),
         "{idle}"
     );
-    let counted = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
+    if idle.contains("partial") {
+        assert!(
+            idle.contains("could not be inspected") && err.contains("could not be inspected"),
+            "{idle}\n{err}"
+        );
+        assert_eq!(err.contains("run as root"), !root, "{err}");
+    } else {
+        assert!(!err.contains("could not be inspected"), "{idle}\n{err}");
+    }
+    let json_out = sb.run(&["who", "--json", "idle.log"]);
+    assert_eq!(json_out.status.code(), Some(1), "{}", stdout_of(&json_out));
+    let counted = stdout_of(&json_out);
     assert_eq!(counted.lines().count(), 1, "{counted}");
-    let unread = counted
-        .trim()
-        .rsplit_once("\"unreadable\":")
-        .and_then(|(_, n)| n.trim_end_matches('}').parse::<u64>().ok())
-        .unwrap_or(0);
+    assert!(counted.contains("\"holders\":[]"), "{counted}");
+    let unread = who_unreadable(&counted);
+    let json_err = stderr_of(&json_out);
     if unread > 0 {
         assert!(
-            idle.contains("the result is partial") && idle.contains("could not be inspected"),
-            "{idle}"
+            json_err.contains("could not be inspected"),
+            "unreadable {unread}: {json_err}"
         );
-        let err = stderr_of(&out);
-        assert!(
-            err.contains("could not be inspected") && err.contains("run as root"),
-            "unreadable {unread}: {err}"
-        );
+        assert_eq!(json_err.contains("run as root"), !root, "{json_err}");
     } else {
-        assert!(!idle.contains("partial"), "{idle}");
+        assert!(
+            !json_err.contains("could not be inspected"),
+            "unreadable 0: {json_err}"
+        );
     }
 }
 

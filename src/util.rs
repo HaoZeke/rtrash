@@ -668,9 +668,50 @@ pub fn items_json(
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `Some(home)` while [`override_home`] is in force on this thread.
+    /// `Some(None)` is an unknown home. `None` means read the environment.
+    static TEST_HOME: std::cell::RefCell<Option<Option<std::path::PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the previous [`home_dir`] override when dropped.
+/// [`Drop`] writes a thread-local, so this guard is `!Send` and `!Sync`.
+#[cfg(test)]
+#[must_use = "the home override ends when this guard drops"]
+pub struct HomeOverride {
+    prev: Option<Option<std::path::PathBuf>>,
+    /// A raw pointer is `!Send` and `!Sync`, and so is this guard.
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(test)]
+impl Drop for HomeOverride {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        TEST_HOME.with(|slot| *slot.borrow_mut() = prev);
+    }
+}
+
+/// Make [`home_dir`] return `home` on this thread until the guard drops.
+/// `None` is an unknown home. Other threads keep reading the environment.
+#[cfg(test)]
+pub fn override_home(home: Option<std::path::PathBuf>) -> HomeOverride {
+    let prev = TEST_HOME.with(|slot| slot.replace(Some(home)));
+    HomeOverride {
+        prev,
+        _thread: std::marker::PhantomData,
+    }
+}
+
 /// The home directory from `HOME` (`USERPROFILE` on Windows), if set
 /// to an absolute path.
 pub fn home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(over) = TEST_HOME.with(|slot| slot.borrow().clone()) {
+        return over.filter(|path| path.is_absolute());
+    }
     let v = std::env::var_os("HOME").filter(|v| !v.is_empty());
     #[cfg(windows)]
     let v = v.or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()));
@@ -1047,6 +1088,53 @@ pub fn is_missing(e: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// One blanket impl, plus one that exists only when `T: Send`.
+    /// Inference of `_` then fails exactly when the guard is `Send`.
+    trait NotSend<A> {
+        fn item() {}
+    }
+    impl<T: ?Sized> NotSend<()> for T {}
+    impl<T: ?Sized + Send> NotSend<u8> for T {}
+
+    /// Same check for `Sync`.
+    trait NotSync<A> {
+        fn item() {}
+    }
+    impl<T: ?Sized> NotSync<()> for T {}
+    impl<T: ?Sized + Sync> NotSync<u8> for T {}
+
+    #[test]
+    fn an_overridden_home_stays_on_this_thread() {
+        use super::{home_dir, override_home};
+        let pinned = std::env::temp_dir().join("rtrash-pattern-home-absent");
+        let nested = std::env::temp_dir().join("rtrash-pattern-home-nested");
+        let real = home_dir();
+        assert_ne!(real.as_deref(), Some(pinned.as_path()));
+        assert_ne!(real.as_deref(), Some(nested.as_path()));
+        let outer = override_home(Some(pinned.clone()));
+        assert_eq!(home_dir().as_deref(), Some(pinned.as_path()));
+        let seen = std::thread::spawn(home_dir).join().expect("home thread");
+        assert_eq!(seen, real, "another thread must keep the real home");
+        {
+            let _inner = override_home(Some(nested.clone()));
+            assert_eq!(home_dir().as_deref(), Some(nested.as_path()));
+        }
+        assert_eq!(
+            home_dir().as_deref(),
+            Some(pinned.as_path()),
+            "inner drop must restore the outer override"
+        );
+        drop(outer);
+        assert_eq!(home_dir(), real);
+    }
+
+    /// `Drop` writes this thread's local, so the guard cannot move.
+    #[test]
+    fn the_home_override_cannot_leave_its_thread() {
+        let _ = <super::HomeOverride as NotSend<_>>::item;
+        let _ = <super::HomeOverride as NotSync<_>>::item;
+    }
+
     /// dua #410 and #406: a long path gets the verbatim prefix in its
     /// absolute form, with its `/` and `..` resolved; a short one, a
     /// verbatim one and a device path stay as they are.

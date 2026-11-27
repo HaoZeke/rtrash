@@ -271,7 +271,8 @@ const SUPPORTED: bool = true;
 /// `RTRASH_TEST_PROC` names, so a test can stand in a few processes. A
 /// process folder there that holds a file named `denied` reads as one
 /// this user may not inspect, which a test run as root cannot get from
-/// file modes.
+/// file modes. That mark takes the same exited-state check as a refused
+/// directory of `/proc`.
 #[cfg(target_os = "linux")]
 fn proc_dir() -> PathBuf {
     if cfg!(debug_assertions) {
@@ -308,12 +309,14 @@ fn scan_in(s: &mut Snapshot, procs: &Path) {
             continue;
         }
         let base = entry.path();
-        if procs != Path::new("/proc") && base.join("denied").exists() {
-            s.unreadable += 1;
-            continue;
-        }
         let mut found: Vec<(String, PathBuf)> = Vec::new();
         let mut denied = false;
+        // The `denied` file is the stand-in for a refused directory. It
+        // must reach the exited-state check below, not count on its own:
+        // a test run as root cannot get `PermissionDenied` from a mode.
+        if procs != Path::new("/proc") && base.join("denied").exists() {
+            denied = true;
+        }
         for link in ["cwd", "root", "exe"] {
             match fs::read_link(base.join(link)) {
                 Ok(p) => {
@@ -1347,6 +1350,55 @@ mod tests {
         std::fs::set_permissions(shut.join("fd"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(s.unreadable, 1);
+    }
+
+    /// A refused fd directory counts only while the process is live.
+    /// `Z`, `X` and `x` do not; `S`, `R` and `D` do. The refusal is mode
+    /// 000, which is `PermissionDenied` for this user and not for root.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_process_with_a_refused_fd_directory_is_not_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rtrash-proc-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // pid, stat state, whether the refused directory counts.
+        let cases = [
+            (4_100_001, "Z", false),
+            (4_100_002, "X", false),
+            (4_100_003, "x", false),
+            (4_100_004, "S", true),
+            (4_100_005, "R", true),
+            (4_100_006, "D", true),
+        ];
+        let mut fds = Vec::new();
+        for (pid, state, _) in cases {
+            let base = dir.join(state).join(pid.to_string());
+            let fd = base.join("fd");
+            std::fs::create_dir_all(&fd).unwrap();
+            std::fs::write(base.join("stat"), format!("1 (cmd) {state} 0\n")).unwrap();
+            std::fs::set_permissions(&fd, std::fs::Permissions::from_mode(0o000)).unwrap();
+            fds.push(fd);
+        }
+        let mut got = Vec::new();
+        for (pid, state, counts) in cases {
+            let mut s = Snapshot {
+                supported: true,
+                ..Snapshot::default()
+            };
+            scan_in(&mut s, &dir.join(state));
+            got.push((pid, state, counts, s.unreadable));
+        }
+        for fd in &fds {
+            let _ = std::fs::set_permissions(fd, std::fs::Permissions::from_mode(0o755));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        for (pid, state, counts, unread) in got {
+            assert_eq!(unread, usize::from(counts), "pid {pid} state {state}");
+        }
     }
 
     /// The state letter is read after the last `)`, so a command name with
