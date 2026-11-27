@@ -7,7 +7,9 @@
 //! thread and leaves the process environment alone: other threads in the
 //! same `cargo test` process are reading it. When the variable is unset,
 //! [`log_when_unset`] names a stand-in for that thread only, and a value
-//! in the environment still wins.
+//! in the environment still wins. The stand-in is opened with `O_NOFOLLOW`,
+//! the same final-component check the trash walks use, so a symlink at
+//! that name is not followed.
 
 use std::cell::RefCell;
 use std::io::Write;
@@ -182,13 +184,32 @@ fn record(why: &str) {
     let current = std::thread::current();
     let test = current.name().unwrap_or("?");
     let line = format!("{bin} {test}: {why}\n");
-    let wrote = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)
-        .and_then(|mut file| file.write_all(line.as_bytes()));
+    let wrote = open_skip_log(&log).and_then(|mut file| file.write_all(line.as_bytes()));
     if let Err(e) = wrote {
         let shown = log.display().to_string();
         eprintln!("RTRASH_SKIP_LOG {shown}: {e}");
+    }
+}
+
+/// Append to `log`, or create it. On Unix the final component is opened
+/// with `O_NOFOLLOW`, the flag `openat` takes in the trash walks. A stat
+/// that refused a symlink, and then a following open, would miss a name
+/// swapped in between the two.
+fn open_skip_log(log: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(log)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
     }
 }
