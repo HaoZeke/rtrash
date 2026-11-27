@@ -11799,6 +11799,47 @@ fn status_fix_keeps_a_record_whose_files_dir_cannot_be_searched() {
     assert!(payload.exists(), "{text}");
 }
 
+/// An unsearchable `files/` is not a missing payload. `list --json` keeps
+/// `"missing":false`, and status does not count the item as dangling.
+#[test]
+fn list_json_and_status_keep_an_unsearchable_payload() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        common::skip("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("list-shut");
+    let keep = sb.work().join("kept.txt");
+    fs::write(&keep, "payload").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let files = sb.trash().join("files");
+    struct Open(std::path::PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _open = Open(files.clone());
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let listed = sb.run(&["list", &pin, "--json"]);
+    assert_eq!(listed.status.code(), Some(0));
+    let body = stdout_of(&listed);
+    assert!(body.contains("\"missing\":false"), "{body}");
+    assert!(!body.contains("\"missing\":true"), "{body}");
+    let status = sb.run(&["status", &pin]);
+    let shown = stdout_of(&status);
+    let warned = stderr_of(&status);
+    assert!(!shown.contains("without a payload"), "{shown}");
+    assert!(!warned.contains("cannot be restored"), "{warned}");
+    let json = sb.run(&["status", &pin, "--json"]);
+    let object = stdout_of(&json);
+    assert!(object.contains("\"dangling\":0"), "{object}");
+    drop(_open);
+    assert!(sb.trash().join("files").join("kept.txt").exists());
+}
+
 /// A file in a folder that denies search is not reported missing: put
 /// names the real error (trash-cli #377), and `-f`, which ignores only
 /// missing files, does not hide it.
