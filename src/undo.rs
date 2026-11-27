@@ -405,4 +405,17 @@ mod tests {
             .collect();
         assert_eq!(paths, [Path::new("/a/y"), Path::new("/a/z")]);
     }
+
+    /// Milliseconds in the id order two runs from the same second. A
+    /// shorter digit string is not a later run.
+    #[test]
+    fn a_later_run_in_the_same_second_stays_first() {
+        let es = vec![
+            entry("/a/early", 50, Some("999-2")),
+            entry("/a/late", 50, Some("1000-1")),
+        ];
+        let runs = batches(&es);
+        let ids: Vec<&str> = runs.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["1000-1", "999-2"]);
+    }
 }

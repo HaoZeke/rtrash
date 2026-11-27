@@ -5783,6 +5783,323 @@ mod tests {
         out
     }
 
+    /// `mount:[inode]` of this process, or empty when it cannot be read.
+    #[cfg(target_os = "linux")]
+    fn mount_namespace_id() -> String {
+        fs::read_link("/proc/self/ns/mnt")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Marker on the bind child's argv. An environment variable would have
+    /// to be listed in the man page; the word is only a test filter.
+    #[cfg(target_os = "linux")]
+    const BIND_CHILD: &str = "rtrash_bind_child";
+
+    /// `rtrash_bind_ns=` plus the caller's mount namespace id.
+    #[cfg(target_os = "linux")]
+    const BIND_NS_PREFIX: &str = "rtrash_bind_ns=";
+
+    /// The caller's mount namespace id when this process is the bind child.
+    #[cfg(target_os = "linux")]
+    fn bind_child_caller_ns() -> Option<String> {
+        let mut child = false;
+        let mut ns = String::new();
+        for arg in std::env::args().skip(1) {
+            if arg == BIND_CHILD {
+                child = true;
+            } else if let Some(id) = arg.strip_prefix(BIND_NS_PREFIX) {
+                ns = id.to_string();
+            }
+        }
+        child.then_some(ns)
+    }
+
+    /// Two pins of one directory, reached by different paths, are one
+    /// trash. A bind mount keeps the paths distinct after `resolve_parent`
+    /// and still shares the device and inode `resolve_dirs` dedups on.
+    /// Linux only: `unshare` and `mount --bind` are not on macOS, where
+    /// this module still builds.
+    ///
+    /// The bind runs only in a private mount namespace. The parent always
+    /// re-executes under `unshare -rm` and passes `BIND_CHILD` plus its
+    /// mount namespace id on the child's argv. The child bind-mounts only
+    /// when that id differs and `/` is private. When the namespace cannot
+    /// be made, the test skips. The parent requires the child's stdout to
+    /// show this test's name with `ok`: a filter that matches nothing
+    /// also exits 0.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_bind_mounted_trash_is_pinned_once() {
+        if let Some(caller_ns) = bind_child_caller_ns() {
+            let mine = mount_namespace_id();
+            assert!(
+                !caller_ns.is_empty() && mine != caller_ns,
+                "refusing to bind-mount in the caller's mount namespace \
+                 (this {mine}, caller {caller_ns})"
+            );
+            let private = std::process::Command::new("mount")
+                .args(["--make-rprivate", "/"])
+                .status()
+                .expect("mount --make-rprivate");
+            assert!(
+                private.success(),
+                "a private mount namespace could not be made; refusing to bind"
+            );
+            bind_mounted_pins_collapse();
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary");
+        let name = "trashdir::tests::a_bind_mounted_trash_is_pinned_once";
+        let spawned = std::process::Command::new("unshare")
+            .args(["-rm", "--"])
+            .arg(&exe)
+            .arg(name)
+            .arg(BIND_CHILD)
+            .arg(format!("{BIND_NS_PREFIX}{}", mount_namespace_id()))
+            .args(["--exact", "--nocapture", "--test-threads=1"])
+            .output();
+        let out = match spawned {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!(
+                    "a_bind_mounted_trash_is_pinned_once: a private mount namespace could not be \
+                     made ({e}); skipping the bind check"
+                );
+                return;
+            }
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let ok_line = format!("test {name} ... ok");
+        if out.status.success() && stdout.contains(&ok_line) {
+            return;
+        }
+        // The harness never started, so `unshare` could not make the namespace.
+        // A filter that matches nothing still prints `running 0 tests` and
+        // exits 0; that is a failure, not a skip.
+        if !stdout.contains("running ") {
+            let why = stderr.trim().replace('\n', " ");
+            let why = if why.is_empty() {
+                format!("status {}", out.status)
+            } else {
+                why
+            };
+            eprintln!(
+                "a_bind_mounted_trash_is_pinned_once: a private mount namespace could not be \
+                 made ({why}); skipping the bind check"
+            );
+            return;
+        }
+        panic!("bind child did not run {name} to ok\n{stdout}{stderr}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn bind_mounted_pins_collapse() {
+        let root = std::env::temp_dir().join(format!("rtrash-bindpin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let real = root.join("real");
+        let bind = root.join("bind");
+        struct Unmount {
+            bind: PathBuf,
+            root: PathBuf,
+        }
+        impl Drop for Unmount {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("umount")
+                    .arg(&self.bind)
+                    .status();
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+        let _guard = Unmount {
+            bind: bind.clone(),
+            root: root.clone(),
+        };
+        fs::create_dir_all(real.join("Trash/files")).unwrap();
+        fs::create_dir_all(real.join("Trash/info")).unwrap();
+        fs::create_dir_all(&bind).unwrap();
+        let mounted = std::process::Command::new("mount")
+            .arg("--bind")
+            .arg(&real)
+            .arg(&bind)
+            .status()
+            .expect("mount");
+        assert!(mounted.success(), "mount --bind");
+        let a = fs::canonicalize(real.join("Trash")).unwrap();
+        let b = fs::canonicalize(bind.join("Trash")).unwrap();
+        assert_ne!(a, b);
+        let id = |p: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            let m = fs::metadata(p).unwrap();
+            (m.dev(), m.ino())
+        };
+        assert_eq!(id(&a), id(&b));
+        assert_eq!(resolve_dirs(&[a.clone(), b.clone()]).len(), 1);
+        assert_eq!(resolve_dirs(&[b, a]).len(), 1);
+    }
+
+    /// A temporary a crashed put left is not the file the next put writes.
+    #[test]
+    fn a_leftover_put_temporary_is_not_reused() {
+        let (root, td) = put_trash("puttemp");
+        let stale = td
+            .info()
+            .join(format!("{PUT_TEMP_PREFIX}{}.0", std::process::id()));
+        fs::write(&stale, b"stale").unwrap();
+        let (temp, file) = create_put_temp(&td.info()).unwrap();
+        drop(file);
+        assert_ne!(temp, stale);
+        assert_eq!(fs::read(&stale).unwrap(), b"stale");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Only the errors of a file system with no hard links take the
+    /// in-place record path. A real I/O error does not.
+    #[test]
+    fn only_a_missing_hard_link_feature_is_that_error() {
+        assert!(hard_links_unsupported(&io::Error::from_raw_os_error(
+            libc::EPERM
+        )));
+        assert!(!hard_links_unsupported(&io::Error::from_raw_os_error(
+            libc::EIO
+        )));
+    }
+
+    /// A line of exactly the cap is a line. One byte more is ignored.
+    #[test]
+    fn a_directorysizes_line_of_exactly_the_cap_is_kept() {
+        let prefix = b"1 2 ";
+        let mut line = prefix.to_vec();
+        line.resize(SIZE_LINE_MAX, b'a');
+        let parsed = directorysizes_parse_line(&line).unwrap();
+        assert_eq!(parsed.size, 1);
+        assert_eq!(parsed.name.len(), SIZE_LINE_MAX - prefix.len());
+        line.push(b'a');
+        assert!(directorysizes_parse_line(&line).is_none());
+    }
+
+    /// The volume of a real path is the mount that actually holds it.
+    /// `/` alone is that volume only when nothing deeper does.
+    #[test]
+    fn a_real_path_has_a_volume_top() {
+        let path = std::env::temp_dir();
+        // macOS reaches temp through /var, a symlink to /private/var.
+        let path = fs::canonicalize(&path).unwrap_or(path);
+        let top = volume_top_of_path(&path).expect("volume");
+        assert!(top.is_absolute(), "{top:?}");
+        assert!(path.starts_with(&top), "{path:?} {top:?}");
+        let expect = expected_volume_top(&path);
+        assert_eq!(Some(top.as_path()), expect.as_deref(), "{path:?}");
+        if expect.as_ref().is_some_and(|p| p != Path::new("/")) {
+            assert_ne!(
+                top.as_path(),
+                Path::new("/"),
+                "{path:?} is under {expect:?}"
+            );
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(deeper) = deeper_mount_probe() {
+            let got = volume_top_of_path(&deeper);
+            let expect = expected_volume_top(&deeper);
+            assert_eq!(got.as_deref(), expect.as_deref(), "{deeper:?}");
+            assert_ne!(
+                got.as_deref(),
+                Some(Path::new("/")),
+                "{deeper:?} is under {expect:?}"
+            );
+        }
+    }
+
+    /// What [`volume_top_of_path`] should report for `path`, from the
+    /// mount table when this build uses it, otherwise from the device walk.
+    fn expected_volume_top(path: &Path) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        if crate::platform::volume_trash_discovery() {
+            if let Ok(table) = read_mount_table() {
+                return top_from_rows(path, &mount_table(&table));
+            }
+        }
+        Some(device_top(path))
+    }
+
+    /// Deepest row of `rows` that contains `path`, or `/` when none does.
+    /// A pseudo file system there is not a volume.
+    #[cfg(target_os = "linux")]
+    fn top_from_rows(path: &Path, rows: &[(PathBuf, String)]) -> Option<PathBuf> {
+        let mut best: Option<&Path> = None;
+        for (mount, _) in rows {
+            if !path.starts_with(mount) {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(have) => {
+                    let n = mount.components().count();
+                    let h = have.components().count();
+                    n > h || (n == h && mount.as_os_str().len() > have.as_os_str().len())
+                }
+            };
+            if better {
+                best = Some(mount);
+            }
+        }
+        let top = best.unwrap_or(Path::new("/")).to_path_buf();
+        match rows.iter().find(|(mount, _)| *mount == top) {
+            Some((_, kind)) if is_pseudo_fs(kind) => None,
+            _ => Some(top),
+        }
+    }
+
+    /// Highest ancestor of `path` on the same device. Independent of the
+    /// mount table, which is what the non-Linux walk uses.
+    fn device_top(start: &Path) -> PathBuf {
+        use std::os::unix::fs::MetadataExt;
+        let dev = fs::symlink_metadata(start).unwrap().dev();
+        let mut cur = start.to_path_buf();
+        while let Some(parent) = cur.parent() {
+            match fs::symlink_metadata(parent) {
+                Ok(meta) if meta.dev() == dev => cur = parent.to_path_buf(),
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// A path under a real mount deeper than `/`, when the table has one.
+    #[cfg(target_os = "linux")]
+    fn deeper_mount_probe() -> Option<PathBuf> {
+        if !crate::platform::volume_trash_discovery() {
+            return None;
+        }
+        let table = read_mount_table().ok()?;
+        let rows = mount_table(&table);
+        let (mount, _) = rows
+            .iter()
+            .find(|(mount, kind)| mount != Path::new("/") && !is_pseudo_fs(kind))?;
+        Some(mount.join("rtrash-volume-top-probe"))
+    }
+
+    /// An empty directory this user cannot write is not wholly removable.
+    /// The access check is what says so: nothing inside it is blocked.
+    #[test]
+    fn an_empty_unwritable_directory_cannot_be_removed() {
+        let root = std::env::temp_dir().join(format!("rtrash-ro-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let d = root.join("d");
+        fs::create_dir_all(&d).unwrap();
+        let _restore = crate::file_replace::RestoreWritable::new(&d, &root);
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
+        if crate::file_replace::skip_when_0555_write_succeeds(
+            "an_empty_unwritable_directory_cannot_be_removed",
+            &d,
+        ) {
+            return;
+        }
+        let err = tree_removable(&d, &fs::symlink_metadata(&d).unwrap()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
     /// A put writes its record under a temporary name and links it into
     /// place: the trash then has the record alone, with one link, and a
     /// clash takes the next name the same way.

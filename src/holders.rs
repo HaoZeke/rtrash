@@ -1529,5 +1529,23 @@ mod tests {
     fn this_process_is_alive_and_pid_zero_is_not() {
         assert!(alive(std::process::id()));
         assert!(!alive(0));
+        // Larger than any pid the kernel will hand out.
+        assert!(!alive(i32::MAX as u32));
+    }
+
+    #[test]
+    fn a_hold_matches_its_command_or_one_of_its_names() {
+        let hold = Hold {
+            pid: 1,
+            uid: None,
+            command: "vim".into(),
+            how: "fd 1".into(),
+            path: PathBuf::from("note"),
+            cmdline: String::new(),
+            names: vec!["vi".into()],
+        };
+        assert!(hold.is("vim"));
+        assert!(hold.is("vi"));
+        assert!(!hold.is("emacs"));
     }
 }

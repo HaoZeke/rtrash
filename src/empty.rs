@@ -1540,4 +1540,60 @@ mod tests {
             info::now_epoch() - 3600
         ));
     }
+
+    fn lock_info(root: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let info = root.join("info");
+        let mut mode = fs::metadata(&info).unwrap().permissions();
+        mode.set_mode(0o555);
+        fs::set_permissions(&info, mode).unwrap();
+    }
+
+    /// The payload can go and the record cannot. That is a failed empty:
+    /// the record stays, and the run is not a success.
+    #[test]
+    fn an_unwritable_record_dir_fails_an_age_empty() {
+        let root = old_trash("info-ro", &["a"]);
+        let _restore = crate::file_replace::RestoreWritable::new(root.join("info"), &root);
+        lock_info(&root);
+        if crate::file_replace::skip_when_0555_write_succeeds(
+            "an_unwritable_record_dir_fails_an_age_empty",
+            &root.join("info"),
+        ) {
+            return;
+        }
+        let argv = vec![
+            "--plain".to_string(),
+            format!("--trash-dir={}", root.display()),
+            "1".to_string(),
+        ];
+        let code = run_inner("rtrash", &argv);
+        assert_ne!(code, 0);
+        assert!(root.join("info/a.trashinfo").exists());
+        assert!(!root.join("files/a").exists());
+    }
+
+    /// `empty PATH` has the same rule: a record that stays is not a
+    /// success, even though the payload is already gone.
+    #[test]
+    fn an_unwritable_record_dir_fails_an_exact_empty() {
+        let root = old_trash("exact-ro", &["a"]);
+        let _restore = crate::file_replace::RestoreWritable::new(root.join("info"), &root);
+        lock_info(&root);
+        if crate::file_replace::skip_when_0555_write_succeeds(
+            "an_unwritable_record_dir_fails_an_exact_empty",
+            &root.join("info"),
+        ) {
+            return;
+        }
+        let argv = vec![
+            "--plain".to_string(),
+            format!("--trash-dir={}", root.display()),
+            "/tmp/a".to_string(),
+        ];
+        let code = run_inner("rtrash", &argv);
+        assert_ne!(code, 0);
+        assert!(root.join("info/a.trashinfo").exists());
+        assert!(!root.join("files/a").exists());
+    }
 }
