@@ -1077,9 +1077,14 @@ The optional
 program prints this same item count and reclaimable size. It does not
 take the trash lock or rewrite
 .IR directorysizes ,
-and it has no age filter
-.RB ( \-\-older\-than
-is this command only). It is the workspace member
+and it has no age or size filter.
+.BR \-\-older\-than ,
+.BR \-\-newer\-than ,
+.B \-\-larger\-than
+and
+.B \-\-smaller\-than
+are unrecognized options, and the program exits 2.
+It is the workspace member
 .I crates/rtrash-hud
 and is not built with the
 .B rtrash
@@ -1117,15 +1122,15 @@ With no trash found, the text display writes
 and
 .B "Total: 0 items (0 B)"
 to stderr.
-.B \-\-larger\-than
-is an unrecognized option, and the program exits 2.
 A
 .B \-\-trash\-dir
 that is not a trash prints
 .B "rtrash: ignoring --trash-dir='...'"
-and then
-.B "rtrash-hud: no valid --trash-dir pins" ,
+with the path in single quotes.
+When that pin is the only one, it then prints
+.B "rtrash-hud: no valid --trash-dir pins"
 and exits 2.
+Beside a valid trash it exits 0 and prints only the ignoring line.
 With
 .BR \-\-json ,
 this program and

@@ -6,6 +6,10 @@ use std::process::Command;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "../../../src/test_skip.rs"]
+mod test_skip;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -65,7 +69,11 @@ fn help_and_version_name_the_display() {
     assert!(text.starts_with("Usage: rtrash-hud"), "{text}");
     assert!(text.contains("item count and reclaimable size"), "{text}");
     assert!(text.contains("RTRASH_MACOS_TRASH=freedesktop"), "{text}");
-    assert!(text.contains("no age filter"), "{text}");
+    assert!(text.contains("no age or size filter"), "{text}");
+    assert!(text.contains("--older-than"), "{text}");
+    assert!(text.contains("--newer-than"), "{text}");
+    assert!(text.contains("--larger-than"), "{text}");
+    assert!(text.contains("--smaller-than"), "{text}");
     assert!(!text.contains("--offline"), "{text}");
     assert!(text.contains("rtrash status"), "{text}");
 
@@ -135,21 +143,62 @@ fn a_pin_that_is_not_a_trash_exits_with_usage() {
         .expect("run rtrash-hud");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("rtrash: ignoring --trash-dir="), "{stderr}");
-    assert!(stderr.contains("rtrash-hud: no valid"), "{stderr}");
+    assert!(
+        stderr.contains("rtrash: ignoring --trash-dir='"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("rtrash-hud: no valid --trash-dir pins"),
+        "{stderr}"
+    );
+}
+
+/// A bad pin beside a valid trash is only the ignoring line, and the
+/// run exits 0. The path is quoted the way rtrash prints it.
+#[cfg(unix)]
+#[test]
+fn a_bad_pin_beside_a_valid_trash_exits_zero() {
+    let good = Tmp::trash("pin-good");
+    fs::write(good.0.join("files").join("kept.txt"), b"x").unwrap();
+    fs::write(
+        good.0.join("info").join("kept.txt.trashinfo"),
+        "[Trash Info]\nPath=/tmp/kept.txt\nDeletionDate=2026-01-02T03:04:05\n",
+    )
+    .unwrap();
+    let bad = Tmp::dir("pin-bad");
+    let out = Command::new(bin())
+        .arg(format!("--trash-dir={}", good.0.display()))
+        .arg(format!("--trash-dir={}", bad.0.display()))
+        .env("RTRASH_MACOS_TRASH", "freedesktop")
+        .output()
+        .expect("run rtrash-hud");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
+    let quoted = format!("rtrash: ignoring --trash-dir='{}'", bad.0.display());
+    assert!(stderr.contains(&quoted), "{stderr}");
+    assert!(!stderr.contains("no valid --trash-dir pins"), "{stderr}");
+    assert!(stdout.contains("Total:"), "{stdout}");
 }
 
 #[cfg(unix)]
 #[test]
-fn larger_than_is_refused() {
-    let out = Command::new(bin())
-        .arg("--larger-than=1")
-        .output()
-        .expect("run rtrash-hud --larger-than");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("unrecognized option"), "{stderr}");
-    assert!(stderr.contains("--larger-than=1"), "{stderr}");
+fn age_and_size_filters_are_refused() {
+    for flag in [
+        "--older-than=1",
+        "--newer-than=1",
+        "--larger-than=1",
+        "--smaller-than=1",
+    ] {
+        let out = Command::new(bin())
+            .arg(flag)
+            .output()
+            .expect("run rtrash-hud");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{flag}: {stderr}");
+        assert!(stderr.contains("unrecognized option"), "{flag}: {stderr}");
+        assert!(stderr.contains(flag), "{flag}: {stderr}");
+    }
 }
 
 #[cfg(unix)]
@@ -482,6 +531,18 @@ fn a_symlink_marker_does_not_remove_a_volume_trash() {
     let meta = fs::symlink_metadata(&home.0).unwrap();
     assert!(!remove_owned_volume(&home.0, meta.dev(), meta.ino()));
     assert!(record.is_file());
+    // A regular marker with the wrong inode used to pass once the
+    // identity check was dropped: the symlink case above still returns
+    // false from the marker check alone.
+    fs::remove_file(&marker).unwrap();
+    fs::write(&marker, b"fixture").unwrap();
+    assert!(marker_is_regular_file(&home.0));
+    assert!(!remove_owned_volume(
+        &home.0,
+        meta.dev(),
+        meta.ino().wrapping_add(1)
+    ));
+    assert!(record.is_file());
     assert!(target.is_file());
 }
 
@@ -491,7 +552,16 @@ fn a_symlink_marker_does_not_remove_a_volume_trash() {
 #[test]
 fn home_only_with_no_pin_skips_a_volume_trash() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    // Declared first so it drops last, after the planted trash is removed.
+    if !Command::new("sudo")
+        .args(["-n", "true"])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        test_skip::skip("sudo unavailable; skipping");
+        return;
+    }
+    // Declared first among the resources the mount holds, so it drops
+    // last, after the planted trash is removed.
     let _global = global_state();
     let uid = rtrash::trashdir::uid();
     let scratch = std::env::temp_dir().join(format!(
@@ -510,7 +580,11 @@ fn home_only_with_no_pin_skips_a_volume_trash() {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    assert!(mounted, "a volume trash needs its own mount point");
+    if !mounted {
+        let _ = fs::remove_dir_all(&scratch);
+        test_skip::skip("mount is not usable here; skipping");
+        return;
+    }
     let trash = scratch.join(format!(".Trash-{uid}"));
     assert!(
         fs::symlink_metadata(&trash).is_err(),

@@ -13,8 +13,10 @@ Usage: rtrash-hud [OPTION]...
 Show each trash's item count and reclaimable size, the same numbers as
 `rtrash status`, and exit. The count comes from the rtrash library; this
 program does not parse .trashinfo files. It does not take the trash lock
-or rewrite directorysizes. It has no age filter (`rtrash status
---older-than` does).
+or rewrite directorysizes. It has no age or size filter.
+--older-than, --newer-than, --larger-than and --smaller-than
+are `rtrash status` options. Each is unrecognized here, and this
+program exits 2.
 
 With no --trash-dir, discovery matches `rtrash status`. On macOS, where
 the Finder Trash is the default, pass --trash-dir or set
@@ -291,7 +293,11 @@ mod tests {
         assert!(HELP.contains("does not"));
         assert!(HELP.contains("RTRASH_MACOS_TRASH=freedesktop"));
         assert!(HELP.contains("macos.trash"));
-        assert!(HELP.contains("no age filter"));
+        assert!(HELP.contains("no age or size filter"));
+        assert!(HELP.contains("--older-than"));
+        assert!(HELP.contains("--newer-than"));
+        assert!(HELP.contains("--larger-than"));
+        assert!(HELP.contains("--smaller-than"));
         assert!(HELP.contains("total_items"));
         assert!(!HELP.contains("--offline"));
     }
