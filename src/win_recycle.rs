@@ -234,7 +234,7 @@ fn remove_index(payload: &Path) -> std::io::Result<()> {
 /// overflow the 1 MiB main-thread stack Windows gives.
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     remakeable_links(src)?;
-    let was_there = std::fs::symlink_metadata(dst).is_ok();
+    let was_there = crate::util::is_there(dst);
     let copied = copy_tree_pairs(src, dst);
     if copied.is_err() && !was_there {
         // remove_dir_all removes a link without entering it.
@@ -757,7 +757,8 @@ pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
                 continue;
             }
         };
-        if std::fs::symlink_metadata(at(&format!("$R{rest}"))).is_err() {
+        // A `$R` that cannot be reached is not gone: `--fix` keeps the `$I`.
+        if crate::util::is_gone(&at(&format!("$R{rest}"))) {
             out.push(BinProblem::Dangling {
                 record,
                 origin: meta.original,
@@ -768,7 +769,8 @@ pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
         let Some(rest) = name.strip_prefix("$R") else {
             continue;
         };
-        if std::fs::symlink_metadata(at(&format!("$I{rest}"))).is_err() {
+        // An unreachable `$I` is not "no record": the `$R` stays unreported.
+        if crate::util::is_gone(&at(&format!("$I{rest}"))) {
             out.push(BinProblem::Orphan { payload: at(name) });
         }
     }
@@ -4289,7 +4291,7 @@ Without PATH, print a numbered list and read an index from stdin.
                     dest.display()
                 ));
             }
-            if dest.symlink_metadata().is_ok() {
+            if crate::util::is_there(dest) {
                 if !force {
                     return Err(format!(
                         "refusing to overwrite '{}' (use -f)",
@@ -4578,7 +4580,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 }
                 (None, _) => orig.clone(),
             };
-            let taken = base.symlink_metadata().is_ok();
+            let taken = crate::util::is_there(&base);
             let dest = match (taken, o.conflict) {
                 (true, Conflict::Skip) => {
                     if o.dry_run {
@@ -4676,7 +4678,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 failed += 1;
                 continue;
             }
-            if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
+            if o.conflict == Conflict::Overwrite && crate::util::is_there(&dest) {
                 let expected = o.seen.get(&it.id).copied().flatten();
                 if let Err(e) = restore_overwrite(it, expected, &dest) {
                     eprintln!(

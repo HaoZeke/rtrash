@@ -992,7 +992,8 @@ pub enum Look {
 /// reached is never taken for a missing one, so a denied file is not
 /// reported as "No such file or directory" (trash-cli #377), and a
 /// record whose payload sits under a denied folder is not taken for
-/// dangling. The precheck refuses `metadata(..).is_err()` elsewhere.
+/// dangling. The precheck refuses `metadata(..).is_err()` and a
+/// `metadata(..).is_ok()` presence test elsewhere.
 pub fn look(path: &std::path::Path) -> Look {
     match std::fs::symlink_metadata(path) {
         Ok(m) => Look::There(Box::new(m)),
@@ -1005,6 +1006,14 @@ pub fn look(path: &std::path::Path) -> Look {
 /// that is there and for one that cannot be reached.
 pub fn is_gone(path: &std::path::Path) -> bool {
     matches!(look(path), Look::Gone)
+}
+
+/// Whether `path` is there, without following a final link. A path that
+/// is gone and one that cannot be reached are both not there. A decision
+/// that the path is gone uses [`is_gone`], which stays false when the
+/// path cannot be reached.
+pub fn is_there(path: &std::path::Path) -> bool {
+    matches!(look(path), Look::There(_))
 }
 
 /// Which file a payload was when a scan or a match read it: its device and
@@ -1285,7 +1294,9 @@ mod tests {
         std::fs::write(top.join("file"), b"x").unwrap();
         std::fs::write(top.join("shut/inner"), b"x").unwrap();
         assert!(is_gone(&top.join("none")));
+        assert!(!is_there(&top.join("none")));
         assert!(is_gone(&top.join("file/below")));
+        assert!(is_there(&top.join("file")));
         assert!(matches!(look(&top.join("file")), Look::There(_)));
         #[cfg(unix)]
         {
@@ -1296,6 +1307,7 @@ mod tests {
             if unsafe { libc::geteuid() } != 0 {
                 assert!(matches!(look(&shut.join("inner")), Look::Unreachable(_)));
                 assert!(!is_gone(&shut.join("inner")));
+                assert!(!is_there(&shut.join("inner")));
             }
             std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
         }

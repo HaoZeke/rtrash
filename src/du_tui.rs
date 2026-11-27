@@ -269,7 +269,7 @@ mod bin {
     }
 
     pub fn untrash(original: &Ticket) -> bool {
-        if original.symlink_metadata().is_ok() {
+        if crate::util::is_there(original) {
             return false;
         }
         let Ok(items) = crate::win_recycle::list_items() else {
@@ -2332,7 +2332,7 @@ impl App {
         }
         let path = crate::util::arg_path(&self.export_to);
         let shown = crate::util::term_path(&path);
-        if std::fs::symlink_metadata(&path).is_ok() {
+        if crate::util::is_there(&path) {
             return format!("'{shown}' exists; nothing written (give a new name)");
         }
         let opts = ScanOpts {

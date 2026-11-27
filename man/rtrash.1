@@ -1035,6 +1035,7 @@ The batch holds the put run id for items rtrash trashed, else null.
 is true for a record whose payload is gone: the item cannot be restored, and
 .B rtrash empty \-\-dangling
 removes the record.
+A payload that cannot be reached is not missing.
 .TP
 .B \-\-help
 Display help and exit.
@@ -1197,6 +1198,7 @@ whose name starts with
 .RB ( "put leftover:" ):
 put writes each record there first, so one that stays was left by a
 put that was killed before the record took its name.
+A payload that cannot be reached is not dangling, and its record is kept.
 A summary goes to stderr, and the exit status is 1 when anything is
 found.
 It takes only
@@ -1363,6 +1365,11 @@ and a
 .I $I
 name that is a folder or a link
 .RB ( stray: ).
+A
+.I $R
+that cannot be reached is not dangling, and its
+.I $I
+is kept.
 .B \-\-fix
 removes the dangling and bad records under the same guards, and a
 payload a bad record named stays, as an orphan.

@@ -1452,7 +1452,7 @@ fn claim_name(
         } else {
             format!("{base}.{}", attempt + 1)
         };
-        if join_name(&files, &name).symlink_metadata().is_ok() {
+        if crate::util::is_there(&join_name(&files, &name)) {
             continue;
         }
         if take(&name)? {

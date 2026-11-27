@@ -351,7 +351,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
             failed += 1;
             continue;
         };
-        let exists = dest.symlink_metadata().is_ok();
+        let exists = crate::util::is_there(&dest);
         let (dest, force) = match (exists, conflict) {
             (true, Conflict::Skip) => {
                 eprintln!(
@@ -454,7 +454,7 @@ fn move_back_inner(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
     let staged = parent.join(format!(".rtrash-restore-{}-{name}", std::process::id()));
     crate::trashdir::relocate(src, &staged)
         .map_err(|e| failed(e, &staged, &format!("cannot stage '{}'", src.display())))?;
-    if dest.symlink_metadata().is_ok() {
+    if crate::util::is_there(dest) {
         if let Err(e) = crate::permanent_guard::remove(dest) {
             return Err(match crate::trashdir::relocate_back(&staged, src) {
                 Ok(()) => format!(
@@ -613,7 +613,7 @@ pub fn put_item(abs: &Path, meta: &fs::Metadata) -> Result<(String, PathBuf), St
             .map_err(|e| format!("cannot create '{}': {e}", trash.display()))?;
         let name = abs.file_name().ok_or("no file name")?;
         let mut dest = trash.join(name);
-        if dest.symlink_metadata().is_ok() {
+        if crate::util::is_there(&dest) {
             dest = crate::restore::free_name(&dest);
         }
         fs::rename(abs, &dest).map_err(|e| e.to_string())?;
@@ -626,7 +626,7 @@ pub fn put_item(abs: &Path, meta: &fs::Metadata) -> Result<(String, PathBuf), St
         Ok(s) => return Err(format!("Finder refused the move (osascript {s})")),
         Err(e) => return Err(format!("cannot run osascript: {e}")),
     }
-    if abs.symlink_metadata().is_ok() {
+    if crate::util::is_there(abs) {
         return Err("Finder left it in place".into());
     }
     let mut new: Vec<_> = names(&trash).difference(&before).cloned().collect();
@@ -1097,7 +1097,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
             failed += 1;
             continue;
         };
-        let exists = dest.symlink_metadata().is_ok();
+        let exists = crate::util::is_there(&dest);
         let (dest, force) = match (exists, conflict) {
             (true, Conflict::Skip) => {
                 if o.dry_run {
@@ -1124,7 +1124,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
                     crate::util::term_path(&e.shown)
                 ));
                 failed += 1;
-            } else if !force && dest.symlink_metadata().is_ok() {
+            } else if !force && crate::util::is_there(&dest) {
                 say(format!(
                     "would fail: '{}' exists",
                     crate::util::term_path(&dest)

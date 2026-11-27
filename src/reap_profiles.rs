@@ -714,7 +714,7 @@ fn has_magic(c: &str) -> bool {
 
 fn walk(base: &Path, comps: &[&str], max: usize, out: &mut Vec<PathBuf>) {
     let Some((first, rest)) = comps.split_first() else {
-        if std::fs::symlink_metadata(base).is_ok() {
+        if crate::util::is_there(base) {
             out.push(base.to_path_buf());
         }
         return;

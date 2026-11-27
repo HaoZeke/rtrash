@@ -131,7 +131,7 @@ fn link_multicall(
     dry_run: bool,
     verbose: bool,
 ) -> io::Result<()> {
-    if link.exists() || link.symlink_metadata().is_ok() {
+    if link.exists() || crate::util::is_there(link) {
         // Already points at us?
         if let Ok(dest) = fs::read_link(link) {
             let dest_ok = dest == target
@@ -325,7 +325,7 @@ fn run_setup(args: &[String]) -> i32 {
     ] {
         let link = bash_dir.join(name);
         let dest = PathBuf::from("rtrash");
-        if link.symlink_metadata().is_ok() {
+        if crate::util::is_there(&link) {
             if opts.force {
                 if opts.verbose || opts.dry_run {
                     eprintln!("rm {}", crate::util::err_path(&link));
@@ -396,7 +396,7 @@ fn run_setup(args: &[String]) -> i32 {
     for name in MULTICALL {
         let link = fish_dir.join(format!("{name}.fish"));
         let dest = PathBuf::from("rtrash.fish");
-        if link.symlink_metadata().is_ok() || link.exists() {
+        if crate::util::is_there(&link) || link.exists() {
             if opts.force {
                 if opts.verbose || opts.dry_run {
                     eprintln!("rm {}", crate::util::err_path(&link));

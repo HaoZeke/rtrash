@@ -2728,15 +2728,24 @@ def check_bounded_walks():
 # `metadata(..).is_err()` takes a path that cannot be reached (EACCES on a
 # parent) for a missing one: put said "No such file or directory" for a
 # denied file on Windows (trash-cli #377), and empty --dangling took every
-# record under a denied files/ for dangling (round 261). util::look and
-# util::is_gone tell the two apart.
-METADATA_IS_ERR = re.compile(r"\b(?:symlink_)?metadata\((?:[^()]|\([^()]*\))*\)\s*\.is_err\(\)")
+# record under a denied files/ for dangling (round 261). The same stat
+# used as `.is_ok()` treated that failure as "no payload", and
+# `status --check --fix` then deleted the records. A nested call such as
+# `at(&format!(...))` hid the `$R` check. util::look, util::is_gone and
+# util::is_there tell presence from a path that cannot be reached.
+_META_ARG = r"(?:[^()]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))*"
+METADATA_IS_ERR = re.compile(
+    rf"\b(?:symlink_)?metadata\({_META_ARG}\)\s*\.is_(?:err|ok)\(\)"
+)
 METADATA_IS_ERR_CASES = [
     ("method", "if p.symlink_metadata().is_err() {", True),
     ("fn", "if std::fs::symlink_metadata(&p.join(x)).is_err() {", True),
     ("follows", "let gone = fs::metadata(p).is_err();", True),
-    ("is_ok", "if p.symlink_metadata().is_ok() {", False),
+    ("is_ok", "if p.symlink_metadata().is_ok() {", True),
+    ("is_ok_and", "if p.symlink_metadata().is_ok_and(|m| m.is_file()) {", False),
+    ("nested", 'if std::fs::symlink_metadata(at(&format!("$R{rest}"))).is_err() {', True),
     ("helper", "if crate::util::is_gone(&p) {", False),
+    ("there", "if crate::util::is_there(&p) {", False),
     ("match", "match fs::symlink_metadata(p) {", False),
 ]
 
@@ -2756,8 +2765,9 @@ def check_missing_looks():
         for k, line in enumerate(rust_code(raw).split("\n")):
             if k not in skip and METADATA_IS_ERR.search(line):
                 errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: metadata(..).is_err() "
-                              "takes a path that cannot be reached for a missing one; use "
-                              "crate::util::is_gone or crate::util::look")
+                              "or .is_ok() takes a path that cannot be reached for a missing or "
+                              "present one; use crate::util::is_gone, crate::util::is_there or "
+                              "crate::util::look")
 
 
 # A du walk decides on an entry before it opens it: an excluded folder is

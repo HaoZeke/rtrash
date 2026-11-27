@@ -142,7 +142,7 @@ pub fn recycle(abs: &Path, is_dir: bool) -> Result<(), String> {
             String::from_utf8_lossy(&st.stderr).trim()
         ));
     }
-    if std::fs::symlink_metadata(abs).is_ok() {
+    if crate::util::is_there(abs) {
         return Err("the Recycle Bin call returned, but the item is still there".into());
     }
     Ok(())

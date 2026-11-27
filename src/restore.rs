@@ -828,7 +828,7 @@ impl Plan<'_> {
             }
             (None, _) => e.original.clone(),
         };
-        let exists = dest.symlink_metadata().is_ok();
+        let exists = crate::util::is_there(&dest);
         let (dest, force) = match (exists, self.conflict) {
             (true, Conflict::Skip) => {
                 if self.dry_run {
@@ -898,7 +898,7 @@ impl Plan<'_> {
             Some(err)
         } else if let Some(why) = payload_unusable(&src, &e.original) {
             Some(why)
-        } else if !force && dest.symlink_metadata().is_ok() {
+        } else if !force && crate::util::is_there(&dest) {
             Some(format!("'{}' exists", crate::util::term_path(&dest)))
         } else {
             None
@@ -1276,7 +1276,7 @@ pub(crate) fn restore_one_to(
         }
     }
 
-    let dest_exists = dest.symlink_metadata().is_ok();
+    let dest_exists = crate::util::is_there(dest);
     if dest_exists && !force {
         return Err(format!(
             "refusing to overwrite existing '{}' (use -f to force)",

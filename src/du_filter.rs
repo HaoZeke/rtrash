@@ -920,7 +920,7 @@ fn enclosing_chain(repo: &Path, root: &Path) -> (Arc<Chain>, bool) {
 fn ignored_from_above(root: &Path) -> Option<(Arc<Chain>, bool)> {
     let repo = crate::du_git::enclosing_repo(root)?;
     let (chain, left_out) = enclosing_chain(&repo, root);
-    let own_repo = root.join(".git").symlink_metadata().is_ok();
+    let own_repo = crate::util::is_there(&root.join(".git"));
     Some((chain, left_out && !own_repo))
 }
 

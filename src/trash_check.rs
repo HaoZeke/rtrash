@@ -5,8 +5,9 @@
 //! or none. Records that cannot serve a restore (unreadable, over the
 //! record cap, no `Path=`, or a volume trash's `Path=` that climbs out
 //! of its volume or names a path outside it) and records whose payload
-//! is gone are what `--fix` removes; a
-//! payload a bad record named stays, as an orphan that list and rm show.
+//! is gone are what `--fix` removes. A payload that cannot be reached
+//! is not gone, so its record stays. A payload a bad record named stays,
+//! as an orphan that list and rm show.
 //! A missing or unreadable `DeletionDate=`, a payload with no record, and
 //! a name in `info/` that is not `NAME.trashinfo` are reported only: each
 //! still lists, and the user decides. Stale `directorysizes` lines need no
@@ -178,7 +179,8 @@ pub fn scan(dir: &TrashDir) -> Vec<Problem> {
             }
         }
         let payload = dir.files().join(OsStr::from_bytes(stem));
-        let has_payload = payload.symlink_metadata().is_ok();
+        // A files/ that denies search fails the stat with EACCES. That is
+        // not a missing payload: --fix must not delete the record.
         let (origin, parsed) = match record_origin(dir, &record) {
             Ok(o) => o,
             Err(why) => {
@@ -186,7 +188,7 @@ pub fn scan(dir: &TrashDir) -> Vec<Problem> {
                 continue;
             }
         };
-        if !has_payload {
+        if crate::util::is_gone(&payload) {
             out.push(Problem::Dangling { record, origin });
             continue;
         }

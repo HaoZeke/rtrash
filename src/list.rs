@@ -82,8 +82,9 @@ pub struct Entry {
 impl Entry {
     /// True when the record's payload under `files/` is gone, so the item
     /// cannot be restored (`rtrash empty --dangling` removes such records).
+    /// A payload that cannot be reached is not gone.
     pub fn missing(&self) -> bool {
-        fs::symlink_metadata(crate::util::join_name(&self.dir.files(), &self.name)).is_err()
+        crate::util::is_gone(&crate::util::join_name(&self.dir.files(), &self.name))
     }
 
     /// Lock this entry's trash and check the entry again: what a scan
@@ -104,7 +105,7 @@ impl Entry {
         // scan saw. One that is gone is for the caller to judge.
         let now = crate::util::fingerprint(&payload);
         let swapped = matches!((self.payload, now), (Some(seen), Some(now)) if seen != now);
-        if fs::symlink_metadata(&record).is_ok() {
+        if crate::util::is_there(&record) {
             if orphan {
                 return Err(Relock::Changed);
             }
@@ -560,7 +561,8 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
                 let info = crate::util::join_info(&info_dir, &name);
                 // The info name is present, including when it is a symlink
                 // and therefore not a record. The payload is not also an orphan.
-                if fs::symlink_metadata(&info).is_ok() {
+                // A record that cannot be reached is not "no record".
+                if !crate::util::is_gone(&info) {
                     return None;
                 }
                 Some(Entry {

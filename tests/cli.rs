@@ -11762,6 +11762,43 @@ fn empty_dangling_keeps_records_whose_payload_cannot_be_reached() {
     assert!(record.exists(), "{} {}", stdout_of(&out), stderr_of(&out));
 }
 
+/// `status --check --fix` keeps a record whose `files/` denies search.
+/// The payload may still be there, so the record is not dangling.
+#[test]
+fn status_fix_keeps_a_record_whose_files_dir_cannot_be_searched() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        common::skip("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("check-shut");
+    let keep = sb.work().join("keep.txt");
+    fs::write(&keep, "k").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let files = sb.trash().join("files");
+    let record = sb.trash().join("info").join("keep.txt.trashinfo");
+    let payload = files.join("keep.txt");
+    struct Open(PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    fs::set_permissions(&files, fs::Permissions::from_mode(0o600)).unwrap();
+    let _open = Open(files);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["status", &pin, "--check", "--fix"]);
+    let text = format!("{}{}", stdout_of(&out), stderr_of(&out));
+    assert!(record.exists(), "{text}");
+    assert!(!stdout_of(&out).contains("dangling:"), "{text}");
+    assert!(!stdout_of(&out).contains("removed "), "{text}");
+    assert!(stderr_of(&out).contains("removed 0 records"), "{text}");
+    drop(_open);
+    assert!(payload.exists(), "{text}");
+}
+
 /// A file in a folder that denies search is not reported missing: put
 /// names the real error (trash-cli #377), and `-f`, which ignores only
 /// missing files, does not hide it.
