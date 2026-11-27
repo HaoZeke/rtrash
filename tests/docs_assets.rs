@@ -247,9 +247,18 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
             text.contains(later),
             "{label} must keep the July compare the later of the two"
         );
-        assert!(!text.contains("current dated numbers"), "{label}");
-        assert!(!text.contains("last harness run"), "{label}");
-        assert!(!text.contains("The crate version is now"), "{label}");
+        assert!(
+            !text.contains("current dated numbers"),
+            "{label} must not say current dated numbers"
+        );
+        assert!(
+            !text.contains("last harness run"),
+            "{label} must not say last harness run"
+        );
+        assert!(
+            !text.contains("The crate version is now"),
+            "{label} must not name the live crate version"
+        );
     }
     let table_line = benches
         .lines()
@@ -295,34 +304,57 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
         has_token(&org, "0.21 s"),
         "sourced org du --inodes cell stays"
     );
+    let markdown_dates = dates_missing_from_headings(&benches).expect("markdown anchor");
     assert!(
-        dates_missing_from_headings(&benches).is_empty(),
-        "markdown names a later-section date that is not a heading: {:?}",
-        dates_missing_from_headings(&benches)
+        markdown_dates.is_empty(),
+        "markdown names a later-section date that is not a heading: {markdown_dates:?}"
     );
+    let org_dates = dates_missing_from_headings(&org).expect("org anchor");
     assert!(
-        dates_missing_from_headings(&org).is_empty(),
-        "org names a later-section date that is not a heading: {:?}",
-        dates_missing_from_headings(&org)
+        org_dates.is_empty(),
+        "org names a later-section date that is not a heading: {org_dates:?}"
     );
     for (label, text) in [
         ("docs/benchmarks.md", &benches),
         ("docs/orgmode/benchmarks.org", &org),
     ] {
-        assert!(text.contains("n_small=400"), "{label}");
-        assert!(text.contains("ASV params 50/200"), "{label}");
+        assert!(
+            text.contains("n_small=400"),
+            "{label} must contain n_small=400"
+        );
+        assert!(
+            text.contains("ASV params 50/200"),
+            "{label} must contain ASV params 50/200"
+        );
     }
     let after_note = benches
         .lines()
         .find(|line| line.contains("\"Before\" means"))
         .expect("2026-10-10 before/after note");
     assert!(
-        after_note.contains("recorded against rtrash 0.1.4"),
-        "the 2026-10-10 after column was recorded against rtrash 0.1.4"
+        after_note.contains("`242a601`"),
+        "the before column must pin 242a601, got {after_note}"
+    );
+    assert!(
+        after_note.contains("`c9db258`"),
+        "the after column must pin c9db258, got {after_note}"
     );
     assert!(
         !after_note.contains("current tree"),
-        "the after column is not the current tree"
+        "the after column must name its commit, got {after_note}"
+    );
+    assert!(
+        !after_note.contains("recorded against rtrash 0.1.4"),
+        "the after column must not read as tag v0.1.4, got {after_note}"
+    );
+    let news = read("docs/newsfragments/+retire-unsourced-bench-table.changed.md");
+    assert!(
+        news.contains("`c9db258`"),
+        "the newsfragment must pin the after column at c9db258, got {news}"
+    );
+    assert!(
+        !news.contains("recorded against rtrash 0.1.4"),
+        "the newsfragment must not read as tag v0.1.4, got {news}"
     );
     assert!(
         !org.contains("2026-10-10"),
@@ -333,7 +365,8 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
 // Bound: the guard starts at `## Performance` and runs to the next unfenced
 // level-1 heading (`# `, not `##` or `###`) or the end of the file. A new
 // `##` section after the Performance paragraphs stays inside the scan. A
-// fenced `## ` line does not end it.
+// fenced `# ` line does not end it. `## Example` would stay inside even
+// with the fence toggle broken, so the sample uses a fenced `# comment`.
 #[test]
 fn retired_row_tokens_ignore_longer_cells_and_inner_headings() {
     assert!(!has_token("12.5x", "2.5x"));
@@ -363,7 +396,7 @@ fn retired_row_tokens_ignore_longer_cells_and_inner_headings() {
         "still 52x",
         "",
         "```",
-        "## Example",
+        "# comment",
         "```",
         "",
         "after fence 52×",
@@ -379,8 +412,28 @@ fn retired_row_tokens_ignore_longer_cells_and_inner_headings() {
     assert!(has_token(body, "52×"));
     assert!(body.contains("### Nested"));
     assert!(body.contains("## Notes"));
-    assert!(body.contains("## Example"));
+    assert!(
+        body.contains("# comment"),
+        "a fenced level-1 comment must stay inside the scan, got {body}"
+    );
     assert!(!has_token(body, "20 000 entries"));
+    let fenced_date = "\
+Later sections of this page name 2026-10-10.
+
+```
+# 2026-10-10 shell comment
+```
+
+* measured (2026-10-13)
+";
+    assert_eq!(
+        dates_missing_from_headings(fenced_date).expect("anchor"),
+        vec!["2026-10-10"]
+    );
+    assert!(
+        dates_missing_from_headings("# 2026-10-10\n").is_err(),
+        "a page with no later-sections sentence must fail"
+    );
     let r2_org = "\
 * Measured results (Linux x86_64, 2026-07-08)
 
@@ -391,7 +444,10 @@ from 2026-10-10, 2026-10-13, and 2026-10-14.
 
 ** One wide directory (2026-10-14)
 ";
-    assert_eq!(dates_missing_from_headings(r2_org), vec!["2026-10-10"]);
+    assert_eq!(
+        dates_missing_from_headings(r2_org).expect("anchor"),
+        vec!["2026-10-10"]
+    );
 }
 
 // See `retired_row_tokens_ignore_longer_cells_and_inner_headings` for the bound.
@@ -521,18 +577,35 @@ fn is_iso_date(bytes: &[u8], i: usize) -> bool {
         && s[8..10].iter().all(u8::is_ascii_digit)
 }
 
-fn dates_missing_from_headings(text: &str) -> Vec<&str> {
+fn unfenced_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+fn dates_missing_from_headings(text: &str) -> Result<Vec<&str>, &'static str> {
     let Some(sentence) = later_sections_sentence(text) else {
-        return Vec::new();
+        return Err("missing Later sections of this page");
     };
-    iso_dates(sentence)
+    let headings = unfenced_lines(text);
+    Ok(iso_dates(sentence)
         .into_iter()
         .filter(|date| {
-            !text
-                .lines()
+            !headings
+                .iter()
                 .any(|line| is_heading(line) && has_token(line, date))
         })
-        .collect()
+        .collect())
 }
 
 fn bold_rtrash_version(line: &str) -> Option<&str> {
