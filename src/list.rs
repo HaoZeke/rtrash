@@ -468,7 +468,18 @@ fn apply_saved(
     use std::os::unix::ffi::OsStrExt;
     for rec in saved.records {
         let path = dir.info().join(std::ffi::OsStr::from_bytes(&rec.file_name));
-        match entry_from_content(dir, &path, &rec.name, pathless, &rec.body) {
+        // The item name is the hashed record's file name. The string
+        // stored beside the body is not a key: a same-user edit can
+        // change it and recompute the checksum.
+        let Some(name) = crate::catalog_cache::item_name(&rec.file_name) else {
+            left.push(Unlisted {
+                record: path,
+                root: dir.root.clone(),
+                trash_cli: None,
+            });
+            continue;
+        };
+        match entry_from_content(dir, &path, name, pathless, &rec.body) {
             Ok(e) => out.push(e),
             Err(trash_cli) => left.push(Unlisted {
                 record: path,

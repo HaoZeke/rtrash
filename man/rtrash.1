@@ -5265,8 +5265,9 @@ or
 .BR yes ,
 makes a reader skip the catalog and does not delete it.
 The macOS Finder list and the Windows Recycle Bin never use it.
-A catalog whose checksum fails, or whose stamp no longer matches, is
-ignored and the records are read.
+A catalog whose checksum fails, whose stamp no longer matches, or
+whose item names do not match the record file names, is ignored
+and the records are read.
 When
 .B XDG_CACHE_HOME
 is unset the directory is

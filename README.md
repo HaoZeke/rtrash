@@ -566,7 +566,7 @@ Full empty was optimized for large trashcans: no pre-scan when not verbose, `d_t
 Emptying uses an in-process bulk tree delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`, not a shell-out to rsync).
 The walk keeps its own stack and at most 16 open directories, so trees of any depth go.
 On btrfs, if a trash payload is a real subvolume root, empty uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.
-List, status, undo, trash-stats, retention and the Python `list_trash` binding read an unchanged trash from a sealed catalog of its records once they are older than twice the coarse clock's tick, and at least 20 ms. A change, including one that keeps the file's timestamps, is read again. The macOS Finder list and the Windows Recycle Bin never use the catalog. `RTRASH_NO_CACHE` set to `1`, `true` or `yes` skips it and does not delete it.
+List, status, undo, trash-stats, retention and the Python `list_trash` binding read an unchanged trash from a sealed catalog of its records once they are older than twice the coarse clock's tick, and at least 20 ms. A change, including one that keeps the file's timestamps, is read again. A catalog whose item names do not match the record file names is ignored. The macOS Finder list and the Windows Recycle Bin never use the catalog. `RTRASH_NO_CACHE` set to `1`, `true` or `yes` skips it and does not delete it.
 
 ## Development
 

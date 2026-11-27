@@ -8,9 +8,10 @@
 //! so a margin taken from the home clock does not cover a coarser trash
 //! volume: a time truncated to that volume's tick is still strictly older
 //! than the blob. A rewrite inside the tick changes the hash and is read
-//! again. A clock that reports no nanoseconds never seals. A changed name,
-//! a short blob, a checksum that fails, or `RTRASH_NO_CACHE` is a full
-//! read too.
+//! again. A stored item name that is not the record's file name, or a
+//! repeated name, is a full read. A clock that reports no nanoseconds
+//! never seals. A changed file name, a short blob, a checksum that
+//! fails, or `RTRASH_NO_CACHE` is a full read too.
 //!
 //! The blob is a private file, mode 0600, under `$XDG_CACHE_HOME/rtrash`.
 //! Load checks the owner and the mode and follows no symlink. A checksum
@@ -18,7 +19,7 @@
 //! they change the trash, so a hit cannot replay entries from before that
 //! command.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -358,6 +359,31 @@ fn is_record_name(name: &[u8]) -> bool {
     crate::util::trash_item_name(&fname).is_some()
 }
 
+/// `file_name` with `.trashinfo` removed, when that is a trash item name.
+/// The stamp hashes this file name. The item name is that, not a second
+/// string stored beside the body.
+pub(crate) fn item_name(file_name: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(file_name).ok()?;
+    crate::util::trash_item_name(text)
+}
+
+/// Every stored name is the item name of its record file, and neither the
+/// names nor the file names repeat. Anything else is not a catalog.
+fn names_bound(records: &[Record]) -> bool {
+    let mut names = HashSet::with_capacity(records.len());
+    let mut files = HashSet::with_capacity(records.len());
+    for rec in records {
+        let Some(derived) = item_name(&rec.file_name) else {
+            return false;
+        };
+        if rec.name != derived || !names.insert(derived) || !files.insert(rec.file_name.as_slice())
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn hash_record(path: &Path) -> Option<u128> {
     let body = crate::info::read_bounded(path, crate::info::RECORD_CAP).ok()?;
     Some(fnv128(b"rtrash-record-v1", &body))
@@ -406,7 +432,7 @@ fn push_row(out: &mut Vec<u8>, row: &Row) {
 
 fn encode(dir: &TrashDir, stamp: &Stamp, saved: &Saved) -> Option<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
-    if saved.records.len() > COUNT_CAP {
+    if saved.records.len() > COUNT_CAP || !names_bound(&saved.records) {
         return None;
     }
     let mut b = Vec::new();
@@ -492,7 +518,7 @@ fn decode(dir: &TrashDir, live: &Stamp, plain: &[u8]) -> Option<Saved> {
             body,
         });
     }
-    if c.i != c.b.len() {
+    if c.i != c.b.len() || !names_bound(&records) {
         return None;
     }
     Some(Saved { records, strays })
@@ -1529,5 +1555,229 @@ mod tests {
         let _ = crate::list::collect(std::slice::from_ref(&iso.dir));
         let notes = NOTES.with(|n| n.borrow().clone());
         assert_eq!(notes, ["scan"], "an unreadable record must not hit");
+    }
+
+    struct ClearKeep;
+
+    impl Drop for ClearKeep {
+        fn drop(&mut self) {
+            crate::keep::clear_test_paths();
+        }
+    }
+
+    fn write_named(dir: &TrashDir, name: &str, path: &str, date: &str, batch: Option<&str>) {
+        let mut body = format!("[Trash Info]\nPath={path}\nDeletionDate={date}\n");
+        if let Some(id) = batch {
+            body.push_str("X-Rtrash-Batch=");
+            body.push_str(id);
+            body.push('\n');
+        }
+        fs::write(dir.info().join(format!("{name}.trashinfo")), body).unwrap();
+        fs::write(dir.files().join(name), vec![b'x'; 8192]).unwrap();
+    }
+
+    /// Seal, prove the next read is a hit, and return the blob.
+    fn sealed_blob(dir: &TrashDir) -> PathBuf {
+        backdate_tree(dir);
+        NOTES.with(|n| n.borrow_mut().clear());
+        let first = crate::list::collect(std::slice::from_ref(dir));
+        assert!(!first.is_empty(), "the trash should list");
+        let blob = cache_path(dir).unwrap();
+        assert!(blob.is_file(), "the catalog should seal");
+        NOTES.with(|n| n.borrow_mut().clear());
+        let _ = crate::list::collect(std::slice::from_ref(dir));
+        assert_eq!(
+            NOTES.with(|n| n.borrow().clone()),
+            ["hit"],
+            "an unchanged trash should hit before the names are edited"
+        );
+        NOTES.with(|n| n.borrow_mut().clear());
+        blob
+    }
+
+    /// Set every stored item name to `name` and recompute the checksum.
+    /// The record file names and bodies stay, so the stamp still matches.
+    fn point_names_at(blob: &Path, name: &str) {
+        let raw = fs::read(blob).unwrap();
+        let plain = unwrap_blob(&raw).expect("the sealed blob should check");
+        let mut c = Cur { b: plain, i: 0 };
+        let mut out = Vec::new();
+        push_u32(&mut out, c.u32().unwrap());
+        push_bytes(&mut out, c.bytes().unwrap());
+        match c.u8().unwrap() {
+            0 => out.push(0),
+            1 => {
+                out.push(1);
+                push_bytes(&mut out, c.bytes().unwrap());
+            }
+            flag => panic!("topdir flag {flag}"),
+        }
+        push_bytes(&mut out, c.bytes().unwrap());
+        push_u64(&mut out, c.u64().unwrap());
+        let n = c.u32().unwrap();
+        push_u32(&mut out, n);
+        for _ in 0..n {
+            let _old = c.bytes().unwrap();
+            push_bytes(&mut out, name.as_bytes());
+            push_bytes(&mut out, c.bytes().unwrap());
+            push_bytes(&mut out, c.bytes().unwrap());
+        }
+        assert_eq!(c.i, plain.len(), "the blob was not fully read");
+        fs::write(blob, wrap(&out)).unwrap();
+        fs::set_permissions(blob, mode(0o600)).unwrap();
+        let rewritten = fs::read(blob).unwrap();
+        assert!(
+            unwrap_blob(&rewritten).is_some(),
+            "the edited checksum should match"
+        );
+        assert!(
+            rewritten
+                .windows(b"aaaa.trashinfo".len())
+                .any(|w| w == b"aaaa.trashinfo"),
+            "the record file name stays in the blob"
+        );
+    }
+
+    fn assert_scan_not_hit() {
+        let notes = NOTES.with(|n| n.borrow().clone());
+        assert!(
+            notes.contains(&"scan"),
+            "expected a disk read, got {notes:?}"
+        );
+        assert!(
+            !notes.contains(&"hit"),
+            "a renamed catalog must not hit, got {notes:?}"
+        );
+    }
+
+    /// Both stored names say `bbbb`, and the checksum is recomputed.
+    /// Retention has to delete the older disk record, `aaaa`.
+    #[test]
+    fn a_renamed_catalog_is_a_miss_for_retention() {
+        let iso = Isolated::open();
+        let _keep = ClearKeep;
+        crate::keep::set_test_paths(Vec::new());
+        write_named(
+            &iso.dir,
+            "aaaa",
+            "/tmp/catalog-name-aaaa",
+            "2020-01-01T00:00:00",
+            None,
+        );
+        write_named(
+            &iso.dir,
+            "bbbb",
+            "/tmp/catalog-name-bbbb",
+            "2026-11-27T16:36:00",
+            None,
+        );
+        let blob = sealed_blob(&iso.dir);
+        point_names_at(&blob, "bbbb");
+        assert!(load(&iso.dir).is_none(), "the renamed catalog was a hit");
+        let sizes = crate::trashdir::DirSizes::load(&iso.dir);
+        let budget = sizes.entry_bytes("aaaa") + sizes.entry_bytes("bbbb") - 1;
+        assert!(budget > 0, "the budget needs a disk use");
+        NOTES.with(|n| n.borrow_mut().clear());
+        let done = crate::retention::prune(
+            "rtrash",
+            std::slice::from_ref(&iso.dir),
+            &crate::retention::Prune {
+                max: budget,
+                policy: crate::retention::Policy::Oldest,
+                dry_run: false,
+                human: crate::util::HumanOutput::default(),
+                protect_batch: None,
+                gone_before: None,
+                free_inodes: 0,
+                only: None,
+            },
+        );
+        assert_scan_not_hit();
+        assert_eq!(done.errors, 0);
+        assert_eq!(done.removed, 1);
+        assert!(
+            !iso.dir.files().join("aaaa").exists(),
+            "retention left the older item"
+        );
+        assert!(
+            iso.dir.files().join("bbbb").exists(),
+            "retention deleted bbbb"
+        );
+    }
+
+    /// The renamed catalog would show only `bbbb`'s batch. An unscoped
+    /// empty has to see `aaaa`'s older batch and refuse.
+    #[test]
+    fn a_renamed_catalog_is_a_miss_for_an_unscoped_empty() {
+        let iso = Isolated::open();
+        let _keep = ClearKeep;
+        crate::keep::set_test_paths(Vec::new());
+        let _tty = crate::util::force_stdin_tty(false);
+        let _home = crate::trashdir::override_home_trash(iso.dir.root.clone());
+        let _fdo = crate::finder::force_freedesktop();
+        write_named(
+            &iso.dir,
+            "aaaa",
+            "/tmp/catalog-name-aaaa",
+            "2020-01-01T00:00:00",
+            Some("1000000000000-1"),
+        );
+        write_named(
+            &iso.dir,
+            "bbbb",
+            "/tmp/catalog-name-bbbb",
+            "2020-01-01T00:00:01",
+            Some("2000000000000-1"),
+        );
+        let blob = sealed_blob(&iso.dir);
+        point_names_at(&blob, "bbbb");
+        assert!(load(&iso.dir).is_none(), "the renamed catalog was a hit");
+        NOTES.with(|n| n.borrow_mut().clear());
+        let code = crate::empty::run(
+            "rtrash",
+            &["--plain".to_string(), "--home-only".to_string()],
+        );
+        assert_scan_not_hit();
+        assert_eq!(code, 2, "an older batch must refuse the empty");
+        assert!(iso.dir.files().join("aaaa").exists());
+        assert!(iso.dir.files().join("bbbb").exists());
+    }
+
+    /// `rm` of `aaaa`'s original path has to remove `aaaa`, not `bbbb`.
+    #[test]
+    fn a_renamed_catalog_is_a_miss_for_rm() {
+        let iso = Isolated::open();
+        let _tty = crate::util::force_stdin_tty(false);
+        write_named(
+            &iso.dir,
+            "aaaa",
+            "/tmp/catalog-name-aaaa",
+            "2020-01-01T00:00:00",
+            None,
+        );
+        write_named(
+            &iso.dir,
+            "bbbb",
+            "/tmp/catalog-name-bbbb",
+            "2026-11-27T16:36:00",
+            None,
+        );
+        let blob = sealed_blob(&iso.dir);
+        point_names_at(&blob, "bbbb");
+        assert!(load(&iso.dir).is_none(), "the renamed catalog was a hit");
+        NOTES.with(|n| n.borrow_mut().clear());
+        let pin = format!("--trash-dir={}", iso.dir.root.display());
+        let code = crate::rm::run("rtrash", &[pin, "/tmp/catalog-name-aaaa".to_string()]);
+        // The decision is the first read. rm then deletes the catalog and
+        // the size it logs can seal a fresh one, so a later note may be a hit.
+        let notes = NOTES.with(|n| n.borrow().clone());
+        assert_eq!(
+            notes.first().copied(),
+            Some("scan"),
+            "rm used the renamed catalog: {notes:?}"
+        );
+        assert_eq!(code, 0, "rm of aaaa's path should succeed");
+        assert!(!iso.dir.files().join("aaaa").exists(), "rm left aaaa");
+        assert!(iso.dir.files().join("bbbb").exists(), "rm removed bbbb");
     }
 }
