@@ -3,10 +3,13 @@
 //! `list` (and everything that collects the same records) reuses the blob
 //! when every name in `info/` and `files/` still has the same kind, device,
 //! inode, size, timestamps and record hash, and every modification time
-//! is older than the blob by the coarse-clock margin. Anything else is a
-//! full read of the records: a changed name, a rewrite by another tool
-//! (including one that keeps the timestamps), a clock with no nanoseconds,
-//! a short or undecryptable blob, or `RTRASH_NO_CACHE`.
+//! is older than the blob by the coarse-clock margin. The hash is the
+//! check that matters. The trash and the blob can sit on different clocks,
+//! so a margin taken from the home clock does not cover a coarser trash
+//! volume: a time truncated to that volume's tick is still strictly older
+//! than the blob. A rewrite inside the tick changes the hash and is read
+//! again. A clock that reports no nanoseconds never seals. A changed name,
+//! a short or undecryptable blob, or `RTRASH_NO_CACHE` is a full read too.
 //!
 //! The blob is XChaCha20-Poly1305 under `$XDG_CACHE_HOME/rtrash`. The
 //! 32-byte key is mode 0600 at `$XDG_DATA_HOME/rtrash/cache.key`. Put,
@@ -262,8 +265,12 @@ fn stamp_of(dir: &TrashDir) -> Option<Stamp> {
     rows.push(dir_row(1, &dir.files())?);
     push_children(2, &dir.info(), &mut rows)?;
     push_children(3, &dir.files(), &mut rows)?;
+    #[cfg(test)]
+    apply_clock(&mut rows);
     // A filesystem that reports no nanoseconds cannot tell two writes in
-    // the same second apart. Listing then reads the records.
+    // the same second apart (FAT). exFAT's 10 ms tick is not that case:
+    // its nanoseconds are non-zero, and the record hash refuses a rewrite
+    // that stays inside the tick. Listing then reads the records.
     let coarse = rows.iter().all(|r| r.mtime_n == 0 && r.ctime_n == 0);
     if coarse {
         return None;
@@ -851,6 +858,28 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     static OVERRIDE: std::cell::RefCell<Option<(PathBuf, PathBuf)>> =
         const { std::cell::RefCell::new(None) };
+    /// exFAT writes one truncated clock into mtime and ctime. `utimensat`
+    /// cannot move ctime, so a test that sets the tick copies mtime over.
+    static COARSE_TICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// FAT reports a zero nanosecond field on every stamp.
+    static ZERO_NSEC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test clocks, applied to the rows a stamp is about to trust.
+#[cfg(test)]
+fn apply_clock(rows: &mut [Row]) {
+    if COARSE_TICK.with(|c| c.get()) {
+        for row in rows.iter_mut() {
+            row.ctime = row.mtime;
+            row.ctime_n = row.mtime_n;
+        }
+    }
+    if ZERO_NSEC.with(|z| z.get()) {
+        for row in rows.iter_mut() {
+            row.mtime_n = 0;
+            row.ctime_n = 0;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -902,6 +931,8 @@ mod tests {
         fn drop(&mut self) {
             OVERRIDE.with(|o| *o.borrow_mut() = None);
             NOTES.with(|n| n.borrow_mut().clear());
+            COARSE_TICK.with(|c| c.set(false));
+            ZERO_NSEC.with(|z| z.set(false));
             let _ = fs::remove_dir_all(&self.root);
         }
     }
@@ -920,6 +951,68 @@ mod tests {
             let f = fs::OpenOptions::new().read(true).open(p).unwrap();
             let times = fs::FileTimes::new().set_accessed(ago).set_modified(ago);
             f.set_times(times).unwrap();
+        };
+        for root in [dir.info(), dir.files()] {
+            for ent in fs::read_dir(&root).unwrap().flatten() {
+                set(&ent.path());
+            }
+            set(&root);
+        }
+    }
+
+    /// One truncated clock, the way exFAT stamps mtime and ctime together.
+    /// `utimensat` cannot move ctime, so the stamp copies mtime onto it.
+    struct CoarseTick;
+
+    impl CoarseTick {
+        fn on() -> Self {
+            COARSE_TICK.with(|c| c.set(true));
+            Self
+        }
+    }
+
+    impl Drop for CoarseTick {
+        fn drop(&mut self) {
+            COARSE_TICK.with(|c| c.set(false));
+        }
+    }
+
+    /// A filesystem that reports no fractional timestamps, the way FAT does.
+    struct ZeroNsec;
+
+    impl ZeroNsec {
+        fn on() -> Self {
+            ZERO_NSEC.with(|z| z.set(true));
+            Self
+        }
+    }
+
+    impl Drop for ZeroNsec {
+        fn drop(&mut self) {
+            ZERO_NSEC.with(|z| z.set(false));
+        }
+    }
+
+    /// Two seconds ago, on a 10 ms boundary, with a non-zero nanosecond field.
+    fn tick_aligned_past() -> (i64, i64) {
+        let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+        let sec = ago.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        (sec, 620_000_000)
+    }
+
+    /// Set every mtime under `info/` and `files/` to one tick.
+    fn set_tick(dir: &TrashDir, sec: i64, nsec: i64) {
+        let set = |p: &Path| {
+            let ts = libc::timespec {
+                tv_sec: sec as _,
+                tv_nsec: nsec as _,
+            };
+            let times = [ts, ts];
+            let bytes = std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str());
+            let c = CString::new(bytes).unwrap();
+            // SAFETY: `c` is NUL-terminated and `times` is two const timespecs.
+            let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+            assert_eq!(rc, 0, "{}", io::Error::last_os_error());
         };
         for root in [dir.info(), dir.files()] {
             for ent in fs::read_dir(&root).unwrap().flatten() {
@@ -1149,6 +1242,93 @@ mod tests {
         assert!(
             stuck,
             "unlink plus create in one tick never reused the inode"
+        );
+    }
+
+    /// exFAT stores 10 ms and a non-zero nanosecond field. The blob is on a
+    /// finer clock, so the truncated trash time is strictly older than the
+    /// blob and the time gate stays open. The rewrite must not come back.
+    #[test]
+    fn a_tick_truncated_rewrite_is_not_served() {
+        use std::os::unix::fs::MetadataExt;
+        let iso = Isolated::open();
+        let _clock = CoarseTick::on();
+        let old = "/tmp/alpha-one.txt";
+        let new = "/tmp/bravo-one.txt";
+        assert_eq!(old.len(), new.len());
+        write_record(&iso.dir, "item.txt", old);
+        let (sec, nsec) = tick_aligned_past();
+        set_tick(&iso.dir, sec, nsec);
+        let info = iso.dir.info().join("item.txt.trashinfo");
+        let meta = fs::symlink_metadata(&info).unwrap();
+        assert_eq!(meta.mtime(), sec);
+        assert_eq!(meta.mtime_nsec(), nsec, "the clock kept the 10 ms tick");
+        let first = crate::list::collect(std::slice::from_ref(&iso.dir));
+        assert_eq!(first[0].original, PathBuf::from(old));
+        assert_eq!(NOTES.with(|n| n.borrow().clone()), ["scan"]);
+        let live = stamp(&iso.dir).expect("stamp");
+        assert_ne!(live.max_m.1, 0, "the tick's nanoseconds are not zero");
+        assert_eq!(live.max_m.1 % 10_000_000, 0);
+        let blob = cache_path(&iso.dir).unwrap();
+        assert!(
+            older_than_file(&live, &fs::metadata(&blob).unwrap()),
+            "a trash time truncated to the tick is older than the blob"
+        );
+        NOTES.with(|n| n.borrow_mut().clear());
+        let second = crate::list::collect(std::slice::from_ref(&iso.dir));
+        assert_eq!(second[0].original, PathBuf::from(old));
+        assert_eq!(NOTES.with(|n| n.borrow().clone()), ["hit"]);
+
+        let body = fs::read(&info).unwrap();
+        let at = body
+            .windows(old.len())
+            .position(|w| w == old.as_bytes())
+            .expect("path");
+        let mut next = body;
+        next[at..at + old.len()].copy_from_slice(new.as_bytes());
+        fs::write(&info, &next).unwrap();
+        set_tick(&iso.dir, sec, nsec);
+        let after = fs::symlink_metadata(&info).unwrap();
+        assert_eq!(after.mtime(), sec);
+        assert_eq!(after.mtime_nsec(), nsec);
+        let live = stamp(&iso.dir).expect("stamp");
+        assert!(
+            older_than_file(&live, &fs::metadata(&blob).unwrap()),
+            "the time gate stays open across the same tick"
+        );
+        NOTES.with(|n| n.borrow_mut().clear());
+        let third = crate::list::collect(std::slice::from_ref(&iso.dir));
+        assert_eq!(third[0].original, PathBuf::from(new));
+        assert!(
+            !NOTES.with(|n| n.borrow().contains(&"hit")),
+            "a same-tick rewrite must not be served"
+        );
+    }
+
+    /// Removing the all-zero nanosecond refusal must fail this test.
+    #[test]
+    fn a_clock_with_no_nanoseconds_never_seals() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "item.txt", "/tmp/alpha-one.txt");
+        backdate_tree(&iso.dir);
+        assert!(stamp(&iso.dir).is_some(), "nanosecond timestamps can seal");
+        let _zero = ZeroNsec::on();
+        assert!(
+            stamp(&iso.dir).is_none(),
+            "a clock with no nanoseconds never seals"
+        );
+        let _ = crate::list::collect(std::slice::from_ref(&iso.dir));
+        assert_eq!(NOTES.with(|n| n.borrow().clone()), ["scan"]);
+        NOTES.with(|n| n.borrow_mut().clear());
+        let _ = crate::list::collect(std::slice::from_ref(&iso.dir));
+        assert_eq!(
+            NOTES.with(|n| n.borrow().clone()),
+            ["scan"],
+            "a zero-nanosecond clock must not hit"
+        );
+        assert!(
+            !cache_path(&iso.dir).unwrap().is_file(),
+            "a zero-nanosecond clock wrote a catalog"
         );
     }
 
