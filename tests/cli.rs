@@ -7303,6 +7303,29 @@ fn as_root(args: &[&str]) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Whether a tmpfs can be mounted here. False when `mount` is missing,
+/// `sudo -n` cannot run it, or this process is root and still may not
+/// mount, as in a user namespace.
+#[cfg(target_os = "linux")]
+fn mount_usable() -> bool {
+    let dir = common::scratch_dir("test", "mount-probe");
+    let at = dir.to_str().unwrap();
+    let ok = as_root(&[
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=1m,mode=0700",
+        "tmpfs",
+        at,
+    ]);
+    if ok {
+        let _ = as_root(&["umount", "-l", at]);
+    }
+    let _ = fs::remove_dir(&dir);
+    ok
+}
+
 /// Mounts made with [`as_root`], undone (lazily, the last made first) when
 /// dropped, before the sandbox that holds them goes.
 #[cfg(target_os = "linux")]
@@ -7329,6 +7352,10 @@ fn a_trash_seen_through_two_bind_mounts_counts_once() {
         return;
     }
     let _global = global_state();
+    if !mount_usable() {
+        common::skip("mount is not usable here; skipping");
+        return;
+    }
     let sb = Sandbox::new("bind-twice");
     let vol = sb.root.join("vol");
     let trash = vol.join(format!(".Trash-{}", unsafe { libc::getuid() }));
@@ -7387,6 +7414,10 @@ fn put_and_empty_follow_volumes_mounted_inside_volumes() {
         return;
     }
     let _global = global_state();
+    if !mount_usable() {
+        common::skip("mount is not usable here; skipping");
+        return;
+    }
     let sb = Sandbox::new("nested-mounts");
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let vol = sb.root.join("vol");
@@ -7511,6 +7542,10 @@ fn trashed_links_into_an_unmounted_volume_go_as_links() {
     let _global = global_state();
     if !as_root(&["true"]) {
         common::skip("sudo unavailable; skipping");
+        return;
+    }
+    if !mount_usable() {
+        common::skip("mount is not usable here; skipping");
         return;
     }
     let sb = Sandbox::new("link-unmounted");
@@ -8318,9 +8353,45 @@ impl Drop for Holder {
     }
 }
 
+/// True when this process is root and still cannot read some `/proc`
+/// process folders. A user namespace maps the caller to root and leaves
+/// other processes unreadable. On macOS the answer is no.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn proc_unreadable_as_root() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            return false;
+        }
+        let Ok(dir) = fs::read_dir("/proc") else {
+            return true;
+        };
+        for entry in dir.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            if let Err(e) = fs::read_dir(entry.path().join("fd")) {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn who_names_the_process_holding_a_file_or_its_directory() {
+    if proc_unreadable_as_root() {
+        common::skip("some /proc entries are not readable; skipping");
+        return;
+    }
     let sb = Sandbox::new("who");
     let held = sb.touch("held.log");
     sb.touch("idle.log");
