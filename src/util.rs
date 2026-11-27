@@ -677,10 +677,13 @@ thread_local! {
 }
 
 /// Restores the previous [`home_dir`] override when dropped.
+/// [`Drop`] writes a thread-local, so this guard is `!Send` and `!Sync`.
 #[cfg(test)]
 #[must_use = "the home override ends when this guard drops"]
 pub struct HomeOverride {
     prev: Option<Option<std::path::PathBuf>>,
+    /// A raw pointer is `!Send` and `!Sync`, and so is this guard.
+    _thread: std::marker::PhantomData<*const ()>,
 }
 
 #[cfg(test)]
@@ -696,7 +699,10 @@ impl Drop for HomeOverride {
 #[cfg(test)]
 pub fn override_home(home: Option<std::path::PathBuf>) -> HomeOverride {
     let prev = TEST_HOME.with(|slot| slot.replace(Some(home)));
-    HomeOverride { prev }
+    HomeOverride {
+        prev,
+        _thread: std::marker::PhantomData,
+    }
 }
 
 /// The home directory from `HOME` (`USERPROFILE` on Windows), if set
@@ -1082,6 +1088,21 @@ pub fn is_missing(e: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// One blanket impl, plus one that exists only when `T: Send`.
+    /// Inference of `_` then fails exactly when the guard is `Send`.
+    trait NotSend<A> {
+        fn item() {}
+    }
+    impl<T: ?Sized> NotSend<()> for T {}
+    impl<T: ?Sized + Send> NotSend<u8> for T {}
+
+    /// Same check for `Sync`.
+    trait NotSync<A> {
+        fn item() {}
+    }
+    impl<T: ?Sized> NotSync<()> for T {}
+    impl<T: ?Sized + Sync> NotSync<u8> for T {}
+
     #[test]
     fn an_overridden_home_stays_on_this_thread() {
         use super::{home_dir, override_home};
@@ -1093,6 +1114,13 @@ mod tests {
             assert_eq!(home_dir().as_deref(), Some(pinned.as_path()));
         }
         assert_eq!(home_dir(), real);
+    }
+
+    /// `Drop` writes this thread's local, so the guard cannot move.
+    #[test]
+    fn the_home_override_cannot_leave_its_thread() {
+        let _ = <super::HomeOverride as NotSend<_>>::item;
+        let _ = <super::HomeOverride as NotSync<_>>::item;
     }
 
     /// dua #410 and #406: a long path gets the verbatim prefix in its
