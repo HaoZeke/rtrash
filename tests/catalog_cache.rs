@@ -273,6 +273,17 @@ fn no_cache_reads_every_record_and_writes_no_blob() {
     sb.put("plain.txt");
     let _ = fs::remove_dir_all(sb.cache());
     let _ = fs::remove_file(sb.log());
+    sb.backdate();
+    let on = sb.list();
+    assert!(on.status.success(), "{}", stderr(&on));
+    assert!(stdout(&on).contains("plain.txt"), "{}", stdout(&on));
+    assert_eq!(
+        blobs(&sb.cache()).len(),
+        1,
+        "a list with the cache on must write a catalog"
+    );
+    let _ = fs::remove_dir_all(sb.cache());
+    let _ = fs::remove_file(sb.log());
     let out = common::rtrash(&sb.root)
         .args(["list", &sb.pin()])
         .current_dir(sb.work())
@@ -433,6 +444,30 @@ fn seal(sb: &Box) {
 
 fn assert_blob_gone(sb: &Box, why: &str) {
     assert!(blobs(&sb.cache()).is_empty(), "{why}");
+}
+
+/// `rm` deletes the catalog even when `RTRASH_NO_CACHE` is set. The
+/// variable only makes a reader skip the blob.
+#[test]
+fn rm_with_no_cache_still_drops_the_catalog() {
+    let sb = Box::open("rm-nocache");
+    sb.put("a.txt");
+    seal(&sb);
+    let pin = sb.pin();
+    let original = sb.work().join("a.txt");
+    let out = common::rtrash(&sb.root)
+        .args(["rm", &pin, original.to_str().unwrap()])
+        .current_dir(sb.work())
+        .env("XDG_CACHE_HOME", sb.root.join(".cache"))
+        .env("RTRASH_NO_CACHE", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        !sb.trash().join("files/a.txt").exists(),
+        "rm must remove the payload"
+    );
+    assert_blob_gone(&sb, "rm with RTRASH_NO_CACHE left the catalog in place");
 }
 
 /// `put` drops the catalog before it tries to move the file. `files/` is

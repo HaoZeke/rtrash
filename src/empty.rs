@@ -249,11 +249,12 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
     status
 }
 
-/// trash-cli's `-i` prompt: name the trash directories, read a y or n.
 /// Whether every item `dirs` holds came from the latest put, read again
 /// from the records. A catalog hit is not that reading: a same-length
 /// rewrite can leave it naming a batch the record no longer has, and the
-/// wipe that follows this check deletes by the names it counted.
+/// wipe that follows this check deletes by the names it counted. No batch
+/// on any record is not a latest put: an empty would otherwise wipe a
+/// trash rtrash did not fill.
 fn latest_put_ok(prog: &str, dirs: &[TrashDir]) -> bool {
     let scanned = list::collect(dirs);
     #[cfg(test)]
@@ -262,7 +263,11 @@ fn latest_put_ok(prog: &str, dirs: &[TrashDir]) -> bool {
     let live: Vec<list::Entry> = scanned.iter().filter_map(list::confirmed).collect();
     let unread = total - live.len();
     let latest = crate::undo::batches(&live).first().map(|b| b.id.clone());
-    let foreign = unread + live.iter().filter(|e| e.batch != latest).count();
+    let foreign = unread
+        + live
+            .iter()
+            .filter(|e| latest.is_none() || e.batch != latest)
+            .count();
     crate::budget::guard_ok(prog, total, foreign)
 }
 
@@ -282,6 +287,7 @@ fn count(dirs: &[TrashDir]) -> Vec<trashdir::Seen> {
     dirs.iter().map(trashdir::Seen::take).collect()
 }
 
+/// trash-cli's `-i` prompt: name the trash directories, read a y or n.
 fn confirm(seen: &[trashdir::Seen]) -> bool {
     eprintln!("Would empty the following trash directories:");
     for s in seen {
@@ -1775,12 +1781,20 @@ mod tests {
             body.push('\n');
             fs::write(r.join("info/two.trashinfo"), body).unwrap();
         }));
-        let dir = TrashDir {
-            root: root.clone(),
-            topdir: None,
-        };
-        assert!(
-            !latest_put_ok("rtrash", &[dir]),
+        // guard_ok asks on a terminal and would read this process's stdin.
+        // The refusal under test is the non-interactive one. The home trash
+        // and the FreeDesktop backend are pinned here so `empty` runs
+        // against this directory and not the Finder Trash.
+        let _tty = crate::util::force_stdin_tty(false);
+        let _home = crate::trashdir::override_home_trash(root.clone());
+        let _fdo = crate::finder::force_freedesktop();
+        crate::keep::set_test_paths(Vec::new());
+        let code = run_inner(
+            "rtrash",
+            &["--plain".to_string(), "--home-only".to_string()],
+        );
+        assert_eq!(
+            code, 2,
             "a live batch from an older put must refuse the empty"
         );
         assert!(root.join("files/one").exists());

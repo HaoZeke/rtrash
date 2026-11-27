@@ -1949,6 +1949,37 @@ fn home_only_empty_ignores_foreign_trash_dir() {
     );
 }
 
+/// Records with no `X-Rtrash-Batch` are not the latest put. An unscoped
+/// empty must refuse them and leave the files. Stdin is closed so a
+/// terminal does not make the guard wait for an answer.
+#[test]
+fn an_unscoped_empty_refuses_a_trash_with_no_batch() {
+    let sb = Sandbox::new("no-batch");
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    fs::write(sb.trash().join("files/plain.txt"), b"keep").unwrap();
+    fs::write(
+        sb.trash().join("info/plain.txt.trashinfo"),
+        "[Trash Info]\nPath=/tmp/plain.txt\nDeletionDate=2020-01-01T00:00:00\n",
+    )
+    .unwrap();
+    let out = common::rtrash(&sb.root)
+        .args(["empty", "--home-only", "--plain"])
+        .current_dir(sb.work())
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run rtrash");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(
+        sb.trash().join("files/plain.txt").is_file(),
+        "the payload went"
+    );
+    assert!(
+        sb.trash().join("info/plain.txt.trashinfo").is_file(),
+        "the record went"
+    );
+}
+
 #[test]
 fn put_writes_complete_trashinfo_after_fsync_path() {
     let sb = Sandbox::new("put-fsync-info");

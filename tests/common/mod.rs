@@ -36,8 +36,8 @@
 //! `XDG_CACHE_HOME` to `home/.cache`, and `rtrash_real` sets it to a
 //! scratch directory: the catalog is not the trash. An integration test
 //! links the library without `cfg(test)`, so the cache is on. On Unix
-//! each test binary snapshots the real cache and key directories at
-//! startup and fails at exit if they changed.
+//! each test binary snapshots the real cache directory and
+//! `$XDG_DATA_HOME/rtrash` at startup and fails at exit if they changed.
 //!
 //! Every test that compares two `du --json` outputs compares them through
 //! `du_scan`, which cuts off the live trash summary: it counts the trash
@@ -327,7 +327,7 @@ pub fn du_row(text: &str, name: &str) -> String {
 /// `LOCALAPPDATA` is [`local_app_data`]`(home)` on Windows, and the
 /// guard and config variables are cleared. Set anything else on the
 /// result; a later `.env` wins. `XDG_CACHE_HOME` is `home/.cache`, so the
-/// sealed catalog and its key stay under `home` with the trash.
+/// sealed catalog stays under `home` with the trash.
 pub fn rtrash(home: &Path) -> Command {
     install_catalog_guard();
     let mut c = Command::new(bin());

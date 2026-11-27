@@ -726,7 +726,45 @@ pub fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `Some` while [`force_stdin_tty`] is in force on this thread.
+    static STDIN_TTY: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Restores the previous [`stdin_is_tty`] override when dropped.
+#[cfg(test)]
+#[must_use = "the stdin tty override ends when this guard drops"]
+pub struct ForcedStdinTty {
+    prev: Option<bool>,
+    /// A raw pointer is `!Send` and `!Sync`, and so is this guard.
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(test)]
+impl Drop for ForcedStdinTty {
+    fn drop(&mut self) {
+        STDIN_TTY.with(|slot| slot.set(self.prev));
+    }
+}
+
+/// Make [`stdin_is_tty`] return `tty` on this thread until the guard drops.
+/// A unit test that reaches a prompt uses this so the prompt never reads
+/// the process stdin.
+#[cfg(test)]
+pub fn force_stdin_tty(tty: bool) -> ForcedStdinTty {
+    let prev = STDIN_TTY.with(|slot| slot.replace(Some(tty)));
+    ForcedStdinTty {
+        prev,
+        _thread: std::marker::PhantomData,
+    }
+}
+
 pub fn stdin_is_tty() -> bool {
+    #[cfg(test)]
+    if let Some(over) = STDIN_TTY.with(|slot| slot.get()) {
+        return over;
+    }
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }

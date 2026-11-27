@@ -504,11 +504,41 @@ end run";
         .status()
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCE_FREEDESKTOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes [`is_default`] return false on this thread until dropped, so an
+/// unscoped empty test stays on the FreeDesktop trash.
+#[cfg(test)]
+#[must_use = "the freedesktop override ends when this guard drops"]
+pub struct ForceFreedesktop {
+    prev: bool,
+}
+
+#[cfg(test)]
+impl Drop for ForceFreedesktop {
+    fn drop(&mut self) {
+        FORCE_FREEDESKTOP.with(|slot| slot.set(self.prev));
+    }
+}
+
+#[cfg(test)]
+pub fn force_freedesktop() -> ForceFreedesktop {
+    let prev = FORCE_FREEDESKTOP.with(|slot| slot.replace(true));
+    ForceFreedesktop { prev }
+}
+
 /// Whether plain put, list, restore and empty use the Finder Trash.
 /// `RTRASH_MACOS_TRASH`, else `macos.trash` in the config, picks finder or
 /// freedesktop; macOS defaults to finder and other systems to freedesktop.
 /// A `--trash-dir` pin (`pinned`) always means the FreeDesktop layout.
 pub fn is_default(pinned: bool) -> bool {
+    #[cfg(test)]
+    if FORCE_FREEDESKTOP.with(|slot| slot.get()) {
+        return false;
+    }
     if pinned {
         return false;
     }

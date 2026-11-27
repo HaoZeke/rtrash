@@ -4877,13 +4877,15 @@ The key bindings file to read instead of
 .B true
 or
 .BR yes ,
-any case): list, status, undo, trash-stats, retention, the Python
+any case): list, status, undo, trash-stats, retention and the Python
 .B list_trash
-binding, rm, restore and empty read every
+binding read every
 .I .trashinfo
 instead of the sealed catalog under
 .IR $XDG_CACHE_HOME/rtrash .
-That skips the catalog and does not delete it. Any other value leaves
+That skips the catalog and does not delete it.
+Put, restore, rm and empty still remove the catalog.
+Any other value leaves
 the catalog on.
 Unset, a catalog that still matches the trash is used.
 The macOS Finder list and the Windows Recycle Bin never use the catalog.
@@ -5249,17 +5251,19 @@ trash-stats, retention and the Python
 .B list_trash
 binding reuse it when
 the records still match and their modification times are older than
-the catalog by more than the coarse clock's tick.
+the catalog by more than twice the coarse clock's tick, and at least
+20 ms.
 The file is mode 0600. Load uses it only when its owner is this user,
 group and other have no permission on it, and it is not a symlink.
-Put, restore, rm and empty remove the catalog.
+Put, restore, rm and empty remove the catalog, including when
 .B RTRASH_NO_CACHE
-set to
+is set.
+That variable, set to
 .BR 1 ,
 .B true
 or
-.B yes
-skips the catalog and does not delete it.
+.BR yes ,
+makes a reader skip the catalog and does not delete it.
 The macOS Finder list and the Windows Recycle Bin never use it.
 A catalog whose checksum fails, or whose stamp no longer matches, is
 ignored and the records are read.

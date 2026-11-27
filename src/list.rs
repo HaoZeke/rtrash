@@ -338,12 +338,12 @@ fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> Listing {
     let mut left = Vec::new();
     let mut strays = Vec::with_capacity(dirs.len());
     for dir in dirs {
-        if let Some(saved) = crate::catalog_cache::load(dir) {
+        let (saved, before) = crate::catalog_cache::load_or_stamp(dir);
+        if let Some(saved) = saved {
             apply_saved(dir, pathless, saved, &mut out, &mut left, &mut strays);
             continue;
         }
         crate::catalog_cache::note_scan();
-        let before = crate::catalog_cache::stamp(dir);
         let Ok(entries) = fs::read_dir(dir.info()) else {
             strays.push(0);
             continue;

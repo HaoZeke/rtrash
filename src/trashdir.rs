@@ -191,11 +191,45 @@ pub fn uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_HOME_TRASH: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Makes [`home_trash`] return `path` on this thread until dropped.
+#[cfg(test)]
+#[must_use = "the home trash override ends when this guard drops"]
+pub struct HomeTrashOverride {
+    prev: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for HomeTrashOverride {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        TEST_HOME_TRASH.with(|slot| *slot.borrow_mut() = prev);
+    }
+}
+
+/// Point [`home_trash`] at `path` on this thread. A unit test of an
+/// unscoped empty uses this instead of `XDG_DATA_HOME`, which other
+/// tests in the process also read.
+#[cfg(test)]
+pub fn override_home_trash(path: PathBuf) -> HomeTrashOverride {
+    let prev = TEST_HOME_TRASH.with(|slot| slot.replace(Some(path)));
+    HomeTrashOverride { prev }
+}
+
 /// The home trash, `$XDG_DATA_HOME/Trash`, with symlinks above `Trash`
 /// resolved. Original locations record resolved parents (see
 /// [`abs_nofollow`]), so the trash root they are reported next to is
 /// resolved the same way (on macOS `/var` is a symlink to `/private/var`).
 pub fn home_trash() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_HOME_TRASH.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
     resolve_parent(&crate::platform::home_trash_from(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),

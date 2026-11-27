@@ -1,7 +1,7 @@
 //! Snapshot the real catalog directories at process start and fail the
 //! test binary at exit if they changed. Integration tests link the library
 //! without `cfg(test)`, so the cache is on; a `list` in the test process
-//! otherwise writes `~/.cache/rtrash`. The key directory stays untouched.
+//! otherwise writes `~/.cache/rtrash`. The data directory stays untouched.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -16,8 +16,8 @@ struct Shot {
 static SHOT: Mutex<Option<Shot>> = Mutex::new(None);
 static START: Once = Once::new();
 
-/// The real cache and key directories this process would use before a
-/// test points `HOME` or the XDG variables at a temp directory.
+/// The real cache directory and `$XDG_DATA_HOME/rtrash` this process would
+/// use before a test points `HOME` or the XDG variables at a temp directory.
 pub fn real_catalog_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
@@ -152,8 +152,8 @@ extern "C" fn guard_check() {
     let now = listing(&paths);
     if now != before {
         eprintln!("the tests changed the real catalog directories:\n{before}---\n{now}");
-        // SAFETY: the suite wrote the real cache or key. Exit non-zero
-        // even when every test already reported success.
+        // SAFETY: the suite wrote the real catalog directories. Exit
+        // non-zero even when every test already reported success.
         unsafe { libc::_exit(1) }
     }
 }
