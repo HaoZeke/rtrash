@@ -20,6 +20,8 @@ pub mod wsl;
 pub mod wsl_bin;
 
 pub mod budget;
+#[cfg(unix)]
+pub mod catalog_cache;
 pub mod compat;
 pub mod config;
 pub mod ds_store;

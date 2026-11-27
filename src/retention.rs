@@ -260,6 +260,7 @@ fn remove_entry(
     name: &str,
     identity: Option<trashdir::PayloadId>,
 ) -> io::Result<()> {
+    crate::catalog_cache::invalidate(dir);
     let payload = crate::util::join_name(&dir.files(), name);
     if trashdir::payload_id(&payload) != identity {
         return Err(io::Error::other(

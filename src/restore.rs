@@ -1322,6 +1322,7 @@ pub(crate) fn restore_one_to(
     // On failure the live dest (if any) is left intact. A Ctrl-C stops a
     // copy across file systems, and the staged part goes. A name that
     // appears at the staging path is not replaced; the next name is tried.
+    crate::catalog_cache::invalidate(&entry.dir);
     let (staged, left) = stage_payload(&src, parent, &entry.name)?;
 
     if dest_exists {

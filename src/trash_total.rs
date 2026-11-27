@@ -122,6 +122,8 @@ pub fn store(dir: &TrashDir, bytes: u64, items: u64) {
 /// it, so the next reader measures again. The stamp alone cannot catch
 /// a change in the same tick of a coarse clock as the store.
 pub fn forget(dir: &TrashDir) {
+    #[cfg(unix)]
+    crate::catalog_cache::invalidate(dir);
     let _ = fs::remove_file(path(dir));
 }
 
@@ -167,6 +169,8 @@ static TOUCHED: std::sync::Mutex<Vec<TrashDir>> = std::sync::Mutex::new(Vec::new
 
 /// Note that this command added items to `dir` or removed some.
 pub fn touched(dir: &TrashDir) {
+    #[cfg(unix)]
+    crate::catalog_cache::invalidate(dir);
     let mut t = TOUCHED.lock().unwrap_or_else(|e| e.into_inner());
     if !t.iter().any(|d| d.root == dir.root) {
         t.push(dir.clone());

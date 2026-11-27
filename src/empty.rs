@@ -1121,6 +1121,7 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
             }
         };
         let (payload, info_path) = (held.payload(), held.record());
+        crate::catalog_cache::invalidate(&entry.dir);
         if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",

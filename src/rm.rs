@@ -619,6 +619,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             status = 1;
             continue;
         }
+        crate::catalog_cache::invalidate(&entry.dir);
         if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",

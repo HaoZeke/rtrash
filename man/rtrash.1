@@ -772,6 +772,20 @@ would be
 itself or the whole trash; no command lists it or acts on it, and a full
 .B empty
 clears it.
+.PP
+While
+.I info/
+and
+.I files/
+are unchanged, list reuses a sealed catalog of the records
+(see
+.I $XDG_CACHE_HOME/rtrash
+under
+.BR FILES ).
+Put, restore, rm, empty and any other change to those directories
+drop it.
+.B RTRASH_NO_CACHE=1
+reads every record.
 .TP
 .B \-\-home\-only
 Only the home trash
@@ -4844,6 +4858,18 @@ The key bindings file to read instead of
 (see
 .BR keys ).
 .TP
+.B RTRASH_NO_CACHE
+.B 1
+(or
+.B true
+or
+.BR yes ,
+any case): list, rm, restore and empty read every
+.I .trashinfo
+instead of the sealed catalog under
+.IR $XDG_CACHE_HOME/rtrash .
+Unset, a catalog that still matches the trash is used.
+.TP
 .B RTRASH_MAX_SIZE
 When set to a size such as 10G, each put afterwards prunes every trash
 directory it used back under that size, removing older items first.
@@ -5198,6 +5224,26 @@ does.
 and
 .B "empty \-\-dry\-run"
 write walked sizes back.
+.TP
+.I $XDG_CACHE_HOME/rtrash/c\-*.bin
+Sealed catalog of one trash's records, so a later list can skip
+reading each
+.I .trashinfo
+while
+.I info/
+and
+.I files/
+are unchanged.
+The key is
+.I $XDG_DATA_HOME/rtrash/cache.key
+(mode 0600).
+Put, restore, rm and empty remove the catalog.
+A catalog that does not decrypt, or whose stamp no longer matches, is
+ignored and the records are read.
+When
+.B XDG_CACHE_HOME
+is unset the directory is
+.IR $HOME/.cache/rtrash .
 .TP
 .I $XDG_CONFIG_HOME/rtrash/config.toml
 Config file (see

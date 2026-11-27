@@ -1270,6 +1270,9 @@ pub fn trash_move(
     trash: &TrashDir,
     allow_cross: bool,
 ) -> io::Result<String> {
+    // Drop the catalog before the trash changes, so a list during this
+    // put cannot replay the entries from before it.
+    crate::catalog_cache::invalidate(trash);
     trash.ensure()?;
     let name = {
         // A Ctrl-C here waits until the record, payload and total agree.
@@ -2860,6 +2863,9 @@ pub fn remove_record(path: &Path) -> io::Result<()> {
             io::ErrorKind::InvalidInput,
             "not a regular file, so not a record; left in place",
         ));
+    }
+    if let Some(root) = path.parent().and_then(|info| info.parent()) {
+        crate::catalog_cache::invalidate_root(root);
     }
     fs::remove_file(path)
 }

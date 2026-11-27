@@ -1087,6 +1087,10 @@ OWN = "a file rtrash wrote itself (cache, temp or link), not user data"
 MOVE = "a move: the source goes only after the whole copy is in place"
 BATCH = "a batch the caller counted up front with permanent_guard::gate_many"
 PERMANENT_ALLOW = {
+    ("catalog_cache.rs", "create_key"): (2, OWN + ": a key file it could not finish writing"),
+    ("catalog_cache.rs", "invalidate_root"): (1, OWN + ": the sealed catalog of a trash that changed"),
+    ("catalog_cache.rs", "load_or_create_key"): (1, OWN + ": a key file of the wrong length"),
+    ("catalog_cache.rs", "store_if_unchanged"): (1, OWN + ": the catalog blob when its mode cannot be set"),
     ("du_dupes.rs", "clone_file"): (2, OWN + ": the clone target it just created"),
     ("du_dupes.rs", "link_one"): (2, OWN + ": the .rtrash-link temp beside the duplicate"),
     ("empty.rs", "empty_exact"): (1, RECORD),
