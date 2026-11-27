@@ -82,6 +82,10 @@ jobs:
           command -v rsync || { sudo apt-get update && sudo apt-get install -y rsync; }
           rsync --version | head -n 1
 
+      - name: desktop-file-validate for the rtrash-hud launcher
+        run: |
+          command -v desktop-file-validate || { sudo apt-get update && sudo apt-get install -y desktop-file-utils; }
+
       - name: Test (nextest, locked, ci profile)
         env:
           RTRASH_REQUIRE_RSYNC: "1"
@@ -91,6 +95,13 @@ jobs:
         env:
           RTRASH_REQUIRE_RSYNC: "1"
         run: cargo nextest run --locked --profile ci --no-default-features
+
+      # Not a default member, so the steps above do not build it and the
+      # CLI's dependency closure stays as it was.
+      - name: Optional rtrash-hud member
+        run: |
+          cargo clippy --locked -p rtrash-hud --all-targets -- -D warnings
+          cargo test --locked -p rtrash-hud --all-targets
 
       - name: Skip notes from the tests
         if: always()
@@ -242,6 +253,11 @@ jobs:
       - name: Test without the TUI feature
         run: cargo test --locked --no-default-features
 
+      # Not a default member. This compiles the branch that reports a
+      # FreeDesktop trash is unavailable on Windows.
+      - name: Optional rtrash-hud member
+        run: cargo test --locked -p rtrash-hud --all-targets
+
       - name: Skip notes from the tests
         if: always()
         shell: bash
@@ -385,6 +401,12 @@ jobs:
         env:
           RTRASH_MACOS_TRASH: freedesktop
           RTRASH_REQUIRE_RSYNC: "1"
+
+      # Not a default member. Pins stay off the Finder Trash.
+      - name: Optional rtrash-hud member
+        run: cargo test --locked -p rtrash-hud --all-targets
+        env:
+          RTRASH_MACOS_TRASH: freedesktop
 
       - name: Skip notes from the tests
         if: always()

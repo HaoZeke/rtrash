@@ -64,6 +64,7 @@ $ rtrash empty --plain
 | `empty --dry-run` | suite GIF |
 | Custom keys (`rtrash keys`, `keys.toml`) | suite GIF |
 | Interactive TUI (fuzzy, multi-select, `?`) | **TTY** — not in the GIF; run `rtrash restore` |
+| Desktop status (`rtrash-hud`) | optional crate; same counts as `rtrash status`; not in the musl tarball |
 | Python `unlink` / `rmtree` | [bindings](docs/bindings.md) |
 
 Demos are regenerable: `./docs/demo/record.sh` (pinned `--trash-dir` sandbox — safe).
@@ -348,6 +349,8 @@ In JSON they carry `"orphan": true`; an age filter leaves them out.
 
 Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`, `--larger-than=SIZE`, `--smaller-than=SIZE`.
 Orphans count as items, noted as `(N without .trashinfo)` per root and as `orphans` in JSON.
+
+The optional `rtrash-hud` program prints that same per-root count and total. It is a workspace member and not a default one, so `cargo build` of the CLI does not build it and the musl tarball does not ship it. Build it with `cargo build -p rtrash-hud`. `crates/rtrash-hud/rtrash-hud.desktop` is a desktop launcher; `desktop-file-validate` checks that file. The program calls the status library for the numbers and does not parse `.trashinfo` files itself. It reads a FreeDesktop trash, not the Finder Trash or the Recycle Bin.
 
 ### `rtrash du [PATH]...`
 

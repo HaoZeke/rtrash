@@ -1,0 +1,1 @@
+Add an optional `rtrash-hud` program that prints the trash item count and reclaimable size, the same numbers as `rtrash status`, by calling that library instead of parsing trash records. It is a workspace member and is not built with the CLI or shipped in the musl tarball. A desktop launcher is `crates/rtrash-hud/rtrash-hud.desktop`.

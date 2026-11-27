@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=rtrash HUD
+GenericName=Trash status
+Comment=Show trash size and item count
+Exec=rtrash-hud
+Terminal=true
+Categories=Utility;FileTools;
+Keywords=trash;status;
+StartupNotify=false

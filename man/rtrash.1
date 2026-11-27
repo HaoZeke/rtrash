@@ -1070,6 +1070,21 @@ notes how many, a hint on stderr names
 .BR "rtrash empty \-\-dangling" ,
 and the JSON roots carry the count as
 .BR dangling .
+.PP
+The optional
+.B rtrash-hud
+program prints this same count. It is the workspace member
+.I crates/rtrash-hud
+and is not built with the
+.B rtrash
+binary or shipped in the musl tarball. A desktop launcher is
+.IR crates/rtrash-hud/rtrash-hud.desktop .
+The program asks this command's library for the numbers and does not
+parse trash records itself. It reads a FreeDesktop trash (the same
+.B \-\-trash\-dir
+and
+.B \-\-home\-only
+pins), not the Finder Trash or the Recycle Bin.
 .TP
 .B \-\-home\-only
 Only the home trash

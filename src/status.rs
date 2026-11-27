@@ -175,7 +175,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     0
 }
 
-pub(crate) struct RootSummary {
+/// One trash as [`print_status`] counts it. `rtrash-hud` reads these fields
+/// instead of parsing `.trashinfo` files.
+pub struct RootSummary {
     pub path: String,
     pub items: u64,
     pub bytes: u64,
@@ -185,7 +187,9 @@ pub(crate) struct RootSummary {
     pub dangling: u64,
 }
 
-pub(crate) fn summarize_dirs(
+/// Per-root rows, total items and total bytes of `dirs`, as [`print_status`]
+/// shows them. Ages are seconds; `size` is the larger/smaller filter.
+pub fn summarize_dirs(
     dirs: &[TrashDir],
     older_than: Option<i64>,
     newer_than: Option<i64>,

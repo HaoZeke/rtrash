@@ -121,7 +121,9 @@ package_one() {
   if [[ "${TARGET}" == *-musl && -z "${!cc_var:-}" ]] && command -v musl-gcc >/dev/null 2>&1; then
     export "${cc_var}=musl-gcc"
   fi
-  cargo build --release --target "${TARGET}"
+  # Name the CLI package. The optional rtrash-hud member is not a default
+  # member and is not part of this tarball.
+  cargo build --release --target "${TARGET}" -p rtrash
 
   if [[ "${TARGET}" == *-windows-* ]]; then
     package_windows "$TARGET"
