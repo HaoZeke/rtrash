@@ -2334,8 +2334,12 @@ impl<'a> DirSizes<'a> {
         let misses = self.misses.into_inner().unwrap_or_else(|e| e.into_inner());
         let files = self.trash.files();
         let gone = |name: &[u8]| {
-            let name = OsStr::from_bytes(name);
-            !fs::symlink_metadata(files.join(name)).is_ok_and(|m| m.is_dir())
+            let path = files.join(OsStr::from_bytes(name));
+            match crate::util::look(&path) {
+                crate::util::Look::Gone => true,
+                crate::util::Look::There(meta) => !meta.is_dir(),
+                crate::util::Look::Unreachable(_) => false,
+            }
         };
         if misses.is_empty() && !self.lines.keys().any(|name| gone(name)) {
             return;
@@ -9285,6 +9289,39 @@ proc /proc proc rw 0 0
         .unwrap();
         assert_eq!(directorysizes_cached_size(&trash, "My Dir"), None);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A `files/` that cannot be searched is not gone. `write_back` keeps
+    /// the cached line instead of dropping it.
+    #[cfg(unix)]
+    #[test]
+    fn directorysizes_keeps_a_line_when_files_cannot_be_searched() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            crate::test_skip::skip("root searches a mode 0600 directory; skipping");
+            return;
+        }
+        let root = sizes_root("shut");
+        let trash = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        fs::create_dir(trash.files().join("tree")).unwrap();
+        fs::write(root.join("directorysizes"), "123 1700000000 tree\n").unwrap();
+        struct Open(PathBuf);
+        impl Drop for Open {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+                let _ = fs::remove_dir_all(self.0.parent().unwrap());
+            }
+        }
+        let _open = Open(trash.files());
+        fs::set_permissions(trash.files(), fs::Permissions::from_mode(0o600)).unwrap();
+        DirSizes::load(&trash).write_back();
+        fs::set_permissions(trash.files(), fs::Permissions::from_mode(0o755)).unwrap();
+        let kept = fs::read_to_string(root.join("directorysizes")).unwrap();
+        assert!(kept.contains("tree"), "{kept}");
     }
 
     #[test]
