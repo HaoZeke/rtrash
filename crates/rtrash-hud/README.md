@@ -30,7 +30,11 @@ or the Recycle Bin. On macOS, where Finder is the default, pass
 Each root has `path`, `items`, `bytes`, `orphans`, and `dangling`. These
 are not the `rtrash status --json` names (`total_items`, `total_bytes`,
 and the `fs_*` fields). With no trash found, the text display writes
-those two lines to stderr, as `rtrash status` does. With `--json`, both
+`No trash directories found` and `Total: 0 items (0 B)` to stderr, as
+`rtrash status` does. There is no size filter: `--larger-than` is an
+unrecognized option and the program exits 2. A `--trash-dir` that is
+not a trash prints `rtrash: ignoring --trash-dir=...` and then
+`rtrash-hud: no valid --trash-dir pins`, and exits 2. With `--json`, both
 write only their JSON object to stdout and leave stderr empty. This
 program prints `{"items":0,"bytes":0,"roots":[]}`. `rtrash status --json`
 prints its own object, with an empty `roots` array and `total_items` and

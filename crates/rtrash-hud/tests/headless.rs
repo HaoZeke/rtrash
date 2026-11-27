@@ -133,7 +133,21 @@ fn a_pin_that_is_not_a_trash_exits_with_usage() {
         .expect("run rtrash-hud");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("no valid"), "{stderr}");
+    assert!(stderr.contains("rtrash: ignoring --trash-dir="), "{stderr}");
+    assert!(stderr.contains("rtrash-hud: no valid"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn larger_than_is_refused() {
+    let out = Command::new(bin())
+        .arg("--larger-than=1")
+        .output()
+        .expect("run rtrash-hud --larger-than");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("unrecognized option"), "{stderr}");
+    assert!(stderr.contains("--larger-than=1"), "{stderr}");
 }
 
 #[cfg(unix)]

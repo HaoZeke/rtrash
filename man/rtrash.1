@@ -1112,7 +1112,20 @@ and
 .B fs_*
 names of this command's
 .BR \-\-json .
-With no trash found, the text display writes those two lines to stderr.
+With no trash found, the text display writes
+.B "No trash directories found"
+and
+.B "Total: 0 items (0 B)"
+to stderr.
+.B \-\-larger\-than
+is an unrecognized option, and the program exits 2.
+A
+.B \-\-trash\-dir
+that is not a trash prints
+.B rtrash:
+ignoring that path, then
+.B "rtrash-hud: no valid --trash-dir pins" ,
+and exits 2.
 With
 .BR \-\-json ,
 this program and
