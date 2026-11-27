@@ -8,8 +8,9 @@
 mod common;
 
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 /// A scratch home in its long, plain form. %TEMP% may be a short 8.3 name
 /// such as `RUNNER~1`, and canonicalize gives the verbatim form.
@@ -796,5 +797,147 @@ fn rm_of_only_a_kept_item_exits_success() {
         serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
     assert_eq!(body["removed"], 0, "{}", text(&json));
     assert_eq!(body["matches"], serde_json::json!([]), "{}", text(&json));
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// The same list reader as `du --files-from`. A CRLF list with a blank
+/// line names the files that were written, and `--zero` reads NUL records.
+#[test]
+fn put_files_from_trashes_the_listed_paths() {
+    let home = home("put-files-from");
+    let work = home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(work.join(name), b"x").unwrap();
+    }
+    let list = home.join("list");
+    fs::write(&list, "a.txt\r\n\nb.txt\n").unwrap();
+    let arg = format!("--files-from={}", s(&list));
+    let out = common::rtrash(&home)
+        .args(["put", &arg])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("a.txt").exists());
+    assert!(!work.join("b.txt").exists());
+    assert!(work.join("c.txt").exists());
+
+    let list0 = home.join("list0");
+    fs::write(&list0, "c.txt\0").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "--zero", "--files-from", &s(&list0)])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("c.txt").exists());
+
+    fs::write(work.join("keep.txt"), b"k").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "--files-from=missing-list"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        text(&out).contains("cannot read --files-from"),
+        "{}",
+        text(&out)
+    );
+    assert!(work.join("keep.txt").exists());
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// `-0` clusters with `-f`, `--files0-from` is the NUL list, and a usage
+/// error for these flags names `--help`.
+#[test]
+fn put_zero_clusters_and_names_help() {
+    let home = home("put-zero-cluster");
+    let work = home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(work.join(name), b"x").unwrap();
+    }
+    let list = home.join("list");
+    fs::write(&list, "a.txt\0").unwrap();
+    let arg = format!("--files-from={}", s(&list));
+    let out = common::rtrash(&home)
+        .args(["put", "-f0", &arg])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("a.txt").exists());
+
+    fs::write(&list, "b.txt\0").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "-0f", "--files-from", &s(&list)])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("b.txt").exists());
+
+    fs::write(&list, "c.txt\0").unwrap();
+    let arg0 = format!("--files0-from={}", s(&list));
+    let out = common::rtrash(&home)
+        .args(["put", &arg0])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!work.join("c.txt").exists());
+
+    fs::write(work.join("keep.txt"), b"k").unwrap();
+    let out = common::rtrash(&home)
+        .args(["put", "--zero", &s(&work.join("keep.txt"))])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    let err = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--zero requires --files-from"), "{err}");
+    assert!(err.contains("Try"), "{err}");
+    assert!(err.contains("--help"), "{err}");
+    assert!(work.join("keep.txt").exists());
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// `--inspect` and `--files-from=-` both read stdin, so put refuses.
+/// The child may exit before this write finishes; a broken pipe is that
+/// refusal, and the exit status is what counts.
+#[test]
+fn put_inspect_refuses_files_from_on_stdin() {
+    let home = home("put-inspect-stdin");
+    let work = home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("a.txt"), b"x").unwrap();
+    let mut child = common::rtrash(&home)
+        .args(["put", "--inspect", "--files-from=-"])
+        .current_dir(&work)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut w = child.stdin.take().unwrap();
+        match w.write_all(b"a.txt\ny\n") {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => {}
+            Err(e) => panic!("failed to write stdin: {e}"),
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    let err = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("--files-from=- and a prompt both read standard input"),
+        "{err}"
+    );
+    assert!(err.contains("Try"), "{err}");
+    assert!(err.contains("--help"), "{err}");
+    assert!(work.join("a.txt").exists());
     let _ = fs::remove_dir_all(&home);
 }

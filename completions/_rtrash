@@ -25,6 +25,9 @@ put_opts=(
   '--dry-run[run every check and print what would move]'
   '--in-use=[when a live process holds an item]:when:(warn refuse ignore)'
   '--json[print a JSON summary of trashed items]'
+  '--files-from=[also trash paths from a file, one per line]:file:_files'
+  '--files0-from=[NUL-separated paths, as find -print0 writes them]:file:_files'
+  '(-0 --zero)'{-0,--zero}'[separate --files-from paths with NUL]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )

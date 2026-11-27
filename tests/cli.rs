@@ -68,6 +68,10 @@ impl Sandbox {
     }
 
     /// Like `run`, but feeds `stdin` to the child (interactive restore selection).
+    ///
+    /// A usage error can exit before the child reads, which closes the pipe.
+    /// `BrokenPipe` is not a failure of the test: the caller still waits and
+    /// asserts the exit status.
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
         let mut child = common::rtrash(&self.root)
             .args(args)
@@ -79,7 +83,11 @@ impl Sandbox {
             .expect("failed to spawn rtrash");
         {
             let mut w = child.stdin.take().expect("stdin");
-            w.write_all(stdin.as_bytes()).unwrap();
+            match w.write_all(stdin.as_bytes()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("failed to write stdin: {e}"),
+            }
         }
         child.wait_with_output().expect("failed to wait rtrash")
     }
@@ -926,6 +934,267 @@ fn put_json_reports_trashed_and_failed() {
     assert!(stderr.contains("removed 'a.txt'"), "{stderr}");
     assert!(stderr.contains("removed directory 'd'"), "{stderr}");
     assert!(stderr.contains("missing.txt"), "{stderr}");
+}
+
+/// `--files-from` adds operands, one path per line, and `--zero` reads
+/// NUL records. Both forms share the reader `du --files-from` uses, so a
+/// CRLF list and a blank line still name the files that were written.
+#[test]
+fn put_files_from_trashes_the_listed_paths() {
+    let sb = Sandbox::new("put-files-from");
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        sb.touch(name);
+    }
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let list = sb.root.join("list");
+    fs::write(&list, "a.txt\r\n\nb.txt\n").unwrap();
+    let list_arg = format!("--files-from={}", list.display());
+    let out = sb.run(&["put", &pin, &list_arg, "c.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        assert!(!sb.work().join(name).exists(), "{name} stayed");
+        assert!(sb.trash().join("files").join(name).is_file(), "{name}");
+    }
+    assert!(sb.work().join("d.txt").exists());
+
+    let list0 = sb.root.join("list0");
+    let d = sb.work().join("d.txt");
+    fs::write(&list0, format!("{}\0", d.display())).unwrap();
+    let out = sb.run(&[
+        "put",
+        &pin,
+        "--zero",
+        "--files-from",
+        list0.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!d.exists());
+    assert!(sb.trash().join("files/d.txt").is_file());
+    assert!(sb.work().join("e.txt").exists());
+
+    let out = sb.run_with_stdin(&["put", &pin, "--files-from=-"], "e.txt\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("e.txt").exists());
+    assert!(sb.trash().join("files/e.txt").is_file());
+
+    sb.touch("keep.txt");
+    let work = sb.work();
+    let out = common::assert_refused_unchanged(&"missing list", &[work.as_path()], 1, &[], || {
+        sb.run(&["put", &pin, "--files-from=missing-list"])
+    });
+    assert!(
+        stderr_of(&out).contains("cannot read --files-from"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    fs::write(&list, "\n").unwrap();
+    let again = format!("--files-from={}", list.display());
+    let out = common::assert_refused_unchanged(&"empty list", &[work.as_path()], 2, &[], || {
+        sb.run_within(5, &["put", &pin, &again])
+    });
+    assert!(
+        stderr_of(&out).contains("missing operand"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    common::assert_refused_unchanged(&"no value", &[work.as_path()], 2, &[], || {
+        sb.run(&["put", &pin, "--files-from"])
+    });
+    let out = common::assert_refused_unchanged(&"two lists", &[work.as_path()], 2, &[], || {
+        sb.run(&["put", &pin, &again, &again])
+    });
+    assert!(
+        stderr_of(&out).contains("only one --files-from"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = common::assert_refused_unchanged(&"zero alone", &[work.as_path()], 2, &[], || {
+        sb.run(&["put", &pin, "--zero", "keep.txt"])
+    });
+    assert!(
+        stderr_of(&out).contains("--zero requires --files-from"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// `-0` clusters with other short options. The lists are NUL records, so a
+/// loop that still rejects `0` exits 2 and these files stay.
+#[test]
+fn put_zero_clusters_with_other_short_options() {
+    let sb = Sandbox::new("put-zero-cluster");
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    sb.touch("c.txt");
+    fs::create_dir(sb.work().join("d")).unwrap();
+    fs::write(sb.work().join("d/x"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let list = sb.root.join("list");
+    let arg = format!("--files-from={}", list.display());
+
+    fs::write(&list, "a.txt\0").unwrap();
+    let out = sb.run(&["put", &pin, "-f0", &arg]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("a.txt").exists(), "a.txt stayed");
+
+    fs::write(&list, "b.txt\0").unwrap();
+    let out = sb.run(&["put", &pin, "-0f", &arg]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("b.txt").exists(), "b.txt stayed");
+
+    fs::write(&list, "d\0").unwrap();
+    let out = sb.run(&["put", &pin, "-rf0", &arg]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("d").exists(), "d stayed");
+
+    fs::write(&list, "c.txt\0").unwrap();
+    let arg0 = format!("--files0-from={}", list.display());
+    let out = sb.run(&["put", &pin, &arg0]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("c.txt").exists(), "c.txt stayed");
+}
+
+/// Command-line operands stay ahead of `--files-from`. The JSON summary
+/// names them in that order.
+#[test]
+fn put_files_from_puts_command_line_paths_first() {
+    let sb = Sandbox::new("put-files-order");
+    sb.touch("argv.txt");
+    sb.touch("listed.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let list = sb.root.join("list");
+    fs::write(&list, "listed.txt\n").unwrap();
+    let arg = format!("--files-from={}", list.display());
+    let out = sb.run(&["put", &pin, "--json", &arg, "argv.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let line = stdout_of(&out);
+    let argv = line.find("argv.txt").unwrap_or_else(|| panic!("{line}"));
+    let listed = line.find("listed.txt").unwrap_or_else(|| panic!("{line}"));
+    assert!(argv < listed, "{line}");
+}
+
+/// `-i` and `--files-from=-` both read stdin, so put refuses before it
+/// moves anything. A list in a file still prompts, and `y` trashes it.
+#[test]
+fn put_i_refuses_files_from_on_stdin() {
+    let sb = Sandbox::new("put-files-stdin");
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let work = sb.work();
+    let out = common::assert_refused_unchanged(&"stdin prompt", &[work.as_path()], 2, &[], || {
+        sb.run_with_stdin(&["put", &pin, "-i", "--files-from=-"], "a.txt\ny\n")
+    });
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("--files-from=- and a prompt both read standard input"),
+        "{err}"
+    );
+
+    let list = sb.root.join("list");
+    fs::write(&list, "b.txt\n").unwrap();
+    let arg = format!("--files-from={}", list.display());
+    let out = sb.run_with_stdin(&["put", &pin, "-i", &arg], "y\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("b.txt").exists(), "b.txt stayed");
+    assert!(sb.work().join("a.txt").exists(), "a.txt was trashed");
+}
+
+/// `--files0-from` is named in the read error and in the one-list error.
+/// A message that always says `--files-from` fails this.
+#[test]
+fn put_files0_from_errors_name_that_flag() {
+    let sb = Sandbox::new("put-files0-err");
+    sb.touch("keep.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let work = sb.work();
+    let out =
+        common::assert_refused_unchanged(&"missing files0", &[work.as_path()], 1, &[], || {
+            sb.run(&["put", &pin, "--files0-from=missing-list0"])
+        });
+    let err = stderr_of(&out);
+    assert!(err.contains("cannot read --files0-from "), "{err}");
+    assert!(!err.contains("cannot read --files-from "), "{err}");
+
+    let out = common::assert_refused_unchanged(&"second flag", &[work.as_path()], 2, &[], || {
+        sb.run(&[
+            "put",
+            &pin,
+            "--files-from=missing-list0",
+            "--files0-from=also-missing",
+        ])
+    });
+    let err = stderr_of(&out);
+    assert!(err.contains("only one --files0-from is allowed"), "{err}");
+}
+
+/// Run `args` on a terminal through script(1). `None` without script.
+/// A child still running after `secs` is killed: that is the put browser
+/// waiting for a key, and the test fails.
+#[cfg(target_os = "linux")]
+fn terminal_within(sb: &Sandbox, args: &str, secs: u64) -> Option<Output> {
+    let script = script_bin()?;
+    let cmd = format!("{} {args}", bin());
+    let out_path = sb.root.join("tty.out");
+    let err_path = sb.root.join("tty.err");
+    let mut child = Command::new(script)
+        .args(["-qec", &cmd, "/dev/null"])
+        .current_dir(sb.work())
+        .env("SHELL", "/bin/sh")
+        .env("NO_COLOR", "1")
+        .env("HOME", &sb.root)
+        .env("USERPROFILE", &sb.root)
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("RTRASH_MACOS_TRASH", "freedesktop")
+        .env("RTRASH_TEST_BIN_DIR", common::test_bin(&sb.root))
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&out_path).unwrap())
+        .stderr(fs::File::create(&err_path).unwrap())
+        .spawn()
+        .expect("failed to run script");
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(secs) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("rtrash on a terminal still running after {secs} s; the put browser opened");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Some(Output {
+        status,
+        stdout: fs::read(&out_path).unwrap(),
+        stderr: fs::read(&err_path).unwrap(),
+    })
+}
+
+/// An empty `--files-from` on a terminal is a missing operand. Passing
+/// `false` instead of `listed` to `browse_empty` opens the browser, and
+/// this test then fails the hang guard.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_empty_files_from_on_a_terminal_does_not_open_the_browser() {
+    let sb = Sandbox::new("put-files-tty");
+    let list = sb.root.join("empty-list");
+    fs::write(&list, "\n").unwrap();
+    let args = format!(
+        "put --trash-dir={} --files-from={}",
+        sb.trash().display(),
+        list.display()
+    );
+    let Some(out) = terminal_within(&sb, &args, 5) else {
+        common::skip("skipping: no script(1) to give rtrash a terminal");
+        return;
+    };
+    let shown = format!("{}{}", stdout_of(&out), stderr_of(&out));
+    assert_eq!(out.status.code(), Some(2), "{shown}");
+    assert!(shown.contains("missing operand"), "{shown}");
 }
 
 /// Run rtrash in `cwd` with the trash under `data_home`.

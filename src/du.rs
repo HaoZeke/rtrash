@@ -5536,42 +5536,12 @@ fn parse_count(s: &str, what: &str) -> Result<usize, String> {
 /// `--files-from=FILE` or `--files0-from=FILE` (true for the NUL form).
 type PathListArg<'a> = Option<(Result<&'a str, String>, bool)>;
 
+/// The file is read by [`crate::path_list::read_path_list`], which put shares.
 fn path_list_arg<'a>(args: &'a [String], i: &mut usize, arg: &'a str) -> PathListArg<'a> {
     if let Some(v) = take_value(args, i, arg, "--files-from", None) {
         return Some((v, false));
     }
     take_value(args, i, arg, "--files0-from", None).map(|v| (v, true))
-}
-
-/// The paths of a `--files-from` (one per line) or `--files0-from` (NUL
-/// separated) list, read from FILE or, for `-`, stdin. Blank entries are
-/// skipped; a line's trailing CR goes, so CRLF lists work.
-fn read_path_list(src: &str, nul: bool) -> io::Result<Vec<PathBuf>> {
-    let mut bytes = Vec::new();
-    if src == "-" {
-        io::Read::read_to_end(&mut io::stdin(), &mut bytes)?;
-    } else {
-        bytes = fs::read(crate::util::arg_path(src))?;
-    }
-    let sep = if nul { b'\0' } else { b'\n' };
-    let mut out = Vec::new();
-    for mut part in bytes.split(|&b| b == sep) {
-        if !nul {
-            part = part.strip_suffix(b"\r").unwrap_or(part);
-        }
-        if part.is_empty() {
-            continue;
-        }
-        #[cfg(unix)]
-        let p = {
-            use std::os::unix::ffi::OsStrExt;
-            PathBuf::from(std::ffi::OsStr::from_bytes(part))
-        };
-        #[cfg(not(unix))]
-        let p = PathBuf::from(String::from_utf8_lossy(part).into_owned());
-        out.push(p);
-    }
-    Ok(out)
 }
 
 /// Value of `--name=V` or of the next argument for `--name V` / `-n V`.
@@ -6048,7 +6018,7 @@ fn run_paths(prog: &str, args: &[String], missing: &mut bool) -> i32 {
                 Ok(v) => v,
                 Err(e) => bail!(e),
             };
-            match read_path_list(v, nul) {
+            match crate::path_list::read_path_list(v, nul) {
                 Ok(list) => paths.extend(list),
                 Err(e) => {
                     eprintln!("{prog}: cannot read path list '{v}': {e}");

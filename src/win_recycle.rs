@@ -2230,12 +2230,31 @@ mod os {
         let mut dry_run = false;
         let mut inspect = false;
         let mut allow_permanent = false;
-        for arg in args {
+        let mut from_list: crate::path_list::FilesFrom = Default::default();
+        let usage = |msg: &str| -> i32 {
+            eprintln!("{prog}: {msg}");
+            eprintln!("Try '{prog} --help' for more information.");
+            2
+        };
+        let mut i = 0usize;
+        while i < args.len() {
+            if !no_more_opts {
+                match from_list.take_flag(args, &mut i) {
+                    Ok(true) => {
+                        i += 1;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(msg) => return usage(msg),
+                }
+            }
+            let arg = args[i].as_str();
             if no_more_opts || arg == "-" || !arg.starts_with('-') {
                 files.push(crate::util::arg_path(arg));
+                i += 1;
                 continue;
             }
-            match arg.as_str() {
+            match arg {
                 "--" => no_more_opts = true,
                 // A later -f turns --inspect off, as on FreeDesktop.
                 "-f" | "--force" => {
@@ -2296,6 +2315,16 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
       --trash-dir=PATH, --home-only
                  accepted for script parity; items always go to the
                    Recycle Bin of their drive
+      --files-from=FILE  also trash the paths in FILE, one per line
+                   (- reads stdin). Blank lines are skipped and a
+                   trailing CR is ignored. Paths on the command line
+                   go first. --inspect and --files-from=- both read
+                   stdin
+      --files0-from=FILE  NUL-separated paths, as find -print0 writes
+                   them; the same as --files-from with -0
+  -0, --zero       separate --files-from paths with NUL, as find
+                   -print0 writes them. -0 clusters with other short
+                   options. An error on its own
       --help     display this help and exit
       --version  output version information and exit
 "
@@ -2308,7 +2337,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 }
                 a if a.starts_with('-') && a.len() > 1 => {
                     // Accept common rm flags as no-ops / best-effort for multi-call.
-                    if a.chars().all(|c| "rRfidv".contains(c) || c == '-') {
+                    // `0` is -0, including inside -rf0, -0f and -f0.
+                    if a.chars().all(|c| "rRfidv0".contains(c) || c == '-') {
                         if a.contains('f') {
                             force = true;
                             inspect = false;
@@ -2316,12 +2346,28 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         if a.contains('v') {
                             verbose = true;
                         }
+                        if a.contains('0') {
+                            from_list.set_nul();
+                        }
+                        i += 1;
                         continue;
                     }
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
                 }
                 a => files.push(crate::util::arg_path(a)),
+            }
+            i += 1;
+        }
+        if let Some(msg) = from_list.refuse_stdin_prompt(inspect) {
+            return usage(msg);
+        }
+        match from_list.load() {
+            Ok(extra) => files.extend(extra),
+            Err(crate::path_list::FilesFromError::Usage(msg)) => return usage(msg),
+            Err(e) => {
+                eprintln!("{prog}: {}", e.message());
+                return 1;
             }
         }
         let _ = plain;
