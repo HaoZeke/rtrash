@@ -40,9 +40,12 @@ pub const GONE_MARK: &str = "  [payload gone]";
 /// One picker row: mark, date, original path, and [`GONE_MARK`] when the
 /// payload is gone.
 pub fn row_text(mark: &str, date: &str, original: &Path, gone: bool) -> String {
+    row_line(mark, date, &original.to_string_lossy(), gone)
+}
+
+fn row_line(mark: &str, date: &str, path: &str, gone: bool) -> String {
     format!(
-        "{mark} {date:<20}  {}{}",
-        original.display(),
+        "{mark} {date:<20}  {path}{}",
         if gone { GONE_MARK } else { "" }
     )
 }
@@ -63,14 +66,24 @@ impl TuiItem for crate::list::Entry {
     }
 }
 
-/// Fuzzy-rank entry indices by original path. Empty query keeps original order.
-pub fn filter_indices<E: TuiItem>(entries: &[&E], query: &str) -> Vec<usize> {
-    let hays: Vec<String> = entries
-        .iter()
-        .map(|e| e.original().to_string_lossy().into_owned())
-        .collect();
+/// Fuzzy-rank cached original-path haystacks. An empty query keeps
+/// original order and allocates no path `String`.
+pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
+    tui_fuzzy::rank_indices(hays, query)
+}
+
+fn hay_of<E: TuiItem>(entry: &E) -> String {
+    entry.original().to_string_lossy().into_owned()
+}
+
+/// Rank `hays` without cloning a path per row. An empty query skips the
+/// pointer list as well.
+fn rank_hays(hays: &[String], query: &str) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return (0..hays.len()).collect();
+    }
     let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
-    tui_fuzzy::rank_indices(&refs, query)
+    filter_indices(&refs, query)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +98,8 @@ enum Mode {
 struct App<'a, E: TuiItem> {
     prog: &'a str,
     entries: Vec<&'a E>,
+    /// Cached original-path display strings; one per `entries` row.
+    hays: Vec<String>,
     /// Per entry, whether its payload is gone (one stat each, at start).
     gone: Vec<bool>,
     filtered: Vec<usize>,
@@ -114,10 +129,12 @@ impl<'a, E: TuiItem> App<'a, E> {
         let n = entries.len();
         let keys = Keymap::load();
         let force_hint = footer_extras(&keys);
+        let hays = entries.iter().copied().map(hay_of).collect();
         let gone = entries.iter().map(|e| e.missing()).collect();
         let mut app = Self {
             prog,
             entries,
+            hays,
             gone,
             filtered: (0..n).collect(),
             list_state,
@@ -146,10 +163,21 @@ impl<'a, E: TuiItem> App<'a, E> {
         self.refilter_query(&q);
     }
 
+    /// Drop one row and the cached path and gone mark that belong to it.
+    fn remove_at(&mut self, ei: usize) {
+        debug_assert_eq!(self.hays.len(), self.entries.len());
+        debug_assert_eq!(self.gone.len(), self.entries.len());
+        self.entries.remove(ei);
+        self.hays.remove(ei);
+        self.gone.remove(ei);
+    }
+
     /// Live or applied filter: rebuild visible indices from `query`.
     fn refilter_query(&mut self, query: &str) {
+        debug_assert_eq!(self.hays.len(), self.entries.len());
+        debug_assert_eq!(self.gone.len(), self.entries.len());
         let prev = self.selected_entry_idx();
-        self.filtered = filter_indices(&self.entries, query);
+        self.filtered = rank_hays(&self.hays, query);
         let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
         self.ensure_scroll();
@@ -161,9 +189,11 @@ impl<'a, E: TuiItem> App<'a, E> {
         let n = self.entries.len();
         let prev = self.selected_entry_idx();
         self.entries.reverse();
+        self.hays.reverse();
+        self.gone.reverse();
         self.sel.remap(|i| n - 1 - i);
         self.newest_first = !self.newest_first;
-        self.filtered = filter_indices(&self.entries, &self.filter);
+        self.filtered = rank_hays(&self.hays, &self.filter);
         let sel = tui_list::reselect_after_filter(prev.map(|i| n - 1 - i), &self.filtered);
         self.list_state.select(sel);
         self.ensure_scroll();
@@ -270,7 +300,7 @@ impl<'a, E: TuiItem> App<'a, E> {
         // Only drop UI rows that actually restored (failed stay visible).
         for &ei in result.succeeded_idxs.iter().rev() {
             if ei < self.entries.len() {
-                self.entries.remove(ei);
+                self.remove_at(ei);
             }
         }
         self.sel.remap_after_removals(&result.succeeded_idxs);
@@ -476,13 +506,17 @@ fn ui<E: TuiItem>(f: &mut ratatui::Frame, app: &mut App<'_, E>) {
     .block(Block::default().borders(Borders::ALL).title("restore"));
     f.render_widget(header, chunks[0]);
 
-    let items: Vec<ListItem> = app
-        .filtered
+    let (start, end) = tui_list::viewport_range(
+        app.list_state.offset(),
+        app.filtered.len(),
+        app.viewport_rows,
+    );
+    let items: Vec<ListItem> = app.filtered[start..end]
         .iter()
         .map(|&ei| {
             let e = app.entries[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
-            ListItem::new(row_text(mark, &date_label(e), e.original(), app.gone[ei]))
+            ListItem::new(row_line(mark, &date_label(e), &app.hays[ei], app.gone[ei]))
         })
         .collect();
 
@@ -494,7 +528,13 @@ fn ui<E: TuiItem>(f: &mut ratatui::Frame, app: &mut App<'_, E>) {
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
         .highlight_symbol("▸ ");
-    f.render_stateful_widget(list, chunks[1], &mut app.list_state);
+    let mut view_state = ListState::default();
+    view_state.select(tui_list::viewport_selected(
+        app.list_state.selected(),
+        start,
+        end,
+    ));
+    f.render_stateful_widget(list, chunks[1], &mut view_state);
 
     let force_hint = footer_extras(&app.keys);
     let keys = match app.mode {
@@ -806,16 +846,72 @@ mod generic_tests {
         }
     }
 
+    fn hays_of(entries: &[&Fake]) -> Vec<String> {
+        entries.iter().map(|e| hay_of(*e)).collect()
+    }
+
     #[test]
     fn generic_items_filter_and_restore() {
         let items = [fake("alpha.txt", false), fake("beta.txt", true)];
         let refs: Vec<&Fake> = items.iter().collect();
-        assert_eq!(filter_indices(&refs, "alp"), vec![0]);
+        let owned = hays_of(&refs);
+        let hays: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(filter_indices(&hays, "alp"), vec![0]);
         assert_eq!(date_label(refs[0]), "2026-10-10 12:00:00");
         let r = restore_selection("trash-restore", &refs, &[0, 1], false);
         assert_eq!(r.succeeded_idxs, vec![0]);
         assert_eq!(r.fail_count, 1);
         assert!(r.log.iter().any(|l| l.text == "restored 'alpha.txt'"));
+    }
+
+    // A row whose payload is already gone. Its own type, so the gone bit
+    // can differ per row.
+    struct Marked {
+        path: PathBuf,
+        payload_gone: bool,
+    }
+
+    impl TuiItem for Marked {
+        fn original(&self) -> &Path {
+            &self.path
+        }
+        fn date(&self) -> Option<&str> {
+            None
+        }
+        fn restore(&self, _force: bool) -> Result<(PathBuf, Vec<String>), String> {
+            Ok((self.path.clone(), vec![]))
+        }
+        fn missing(&self) -> bool {
+            self.payload_gone
+        }
+    }
+
+    fn marked(path: &str, payload_gone: bool) -> Marked {
+        Marked {
+            path: PathBuf::from(path),
+            payload_gone,
+        }
+    }
+
+    /// Reordering and a successful restore keep each cached path, and the
+    /// gone mark, on the row they were read with.
+    #[test]
+    fn order_and_restore_keep_the_cached_path_with_its_row() {
+        let keep = marked("/keep", true);
+        let drop = marked("/drop", false);
+        let items = [keep, drop];
+        let refs: Vec<&Marked> = items.iter().collect();
+        let mut app = App::new("rtrash", refs, true, true);
+        assert_eq!(app.hays, ["/keep", "/drop"]);
+        assert_eq!(app.gone, [true, false]);
+        app.toggle_order();
+        assert_eq!(app.hays, ["/drop", "/keep"]);
+        assert_eq!(app.gone, [false, true]);
+        app.toggle_order();
+        app.perform_restores_tracked(&[0], true);
+        assert_eq!(app.hays, ["/drop"]);
+        assert_eq!(app.gone, [false]);
+        assert_eq!(app.entries[0].original(), Path::new("/drop"));
     }
 }
 
@@ -842,12 +938,18 @@ mod tests {
         }
     }
 
+    fn hays_of(entries: &[&Entry]) -> Vec<String> {
+        entries.iter().map(|e| hay_of(*e)).collect()
+    }
+
     #[test]
     fn filter_empty_matches_all() {
         let a = entry("/home/u/a.txt");
         let b = entry("/var/log/b.log");
         let entries = vec![&a, &b];
-        assert_eq!(filter_indices(&entries, ""), vec![0, 1]);
+        let owned = hays_of(&entries);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(filter_indices(&refs, ""), vec![0, 1]);
     }
 
     #[test]
@@ -855,9 +957,29 @@ mod tests {
         let a = entry("/var/cache/n_x_o_t_e_s_backup.bin");
         let b = entry("/home/user/Notes.md");
         let entries = vec![&a, &b];
-        let ranked = filter_indices(&entries, "notes");
+        let owned = hays_of(&entries);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let ranked = filter_indices(&refs, "notes");
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0], 1);
+    }
+
+    #[test]
+    fn filter_empty_query_on_cached_hays_keeps_order() {
+        let owned: Vec<String> = (0..5000).map(|i| format!("/tmp/file-{i}.txt")).collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let all = filter_indices(&refs, "");
+        assert_eq!(all.len(), 5000);
+        assert_eq!(all[0], 0);
+        assert_eq!(all[4999], 4999);
+        let ranked = filter_indices(&refs, "file-1");
+        assert!(!ranked.is_empty());
+        assert!(
+            ranked
+                .iter()
+                .all(|&i| tui_fuzzy::fuzzy_score(refs[i], "file-1").is_some()),
+            "a keystroke ranks the cached haystacks"
+        );
     }
 
     #[test]
@@ -887,9 +1009,47 @@ mod tests {
             PathBuf::from("/mid")
         );
         assert_eq!(app.status, "oldest first");
+        assert_eq!(app.hays, ["/old", "/mid", "/new"]);
         app.toggle_order();
         assert!(app.newest_first);
         assert_eq!(app.sel.marked_sorted(), vec![0]);
+        assert_eq!(app.hays, ["/new", "/mid", "/old"]);
+    }
+
+    /// A filter after the order flip ranks the cached path of the row
+    /// that now sits at that index.
+    #[test]
+    fn toggle_order_filters_the_cached_path() {
+        let (a, b, c) = (entry("/new"), entry("/mid"), entry("/old"));
+        let mut app = App::new("restore", vec![&a, &b, &c], false, true);
+        app.keys = Keymap::builtin();
+        app.toggle_order();
+        app.refilter_query("old");
+        assert_eq!(app.filtered, vec![0]);
+        assert_eq!(
+            app.selected_entry().unwrap().original,
+            PathBuf::from("/old")
+        );
+    }
+
+    /// A scrolled list draws the window around the cursor, and the cursor
+    /// index stays on the full filtered list.
+    #[test]
+    fn a_scrolled_list_draws_only_its_viewport() {
+        let entries: Vec<Entry> = (0..30)
+            .map(|i| entry(&format!("/tmp/row-{i:02}")))
+            .collect();
+        let refs: Vec<&Entry> = entries.iter().collect();
+        let mut app = App::new("restore", refs, false, true);
+        app.keys = Keymap::builtin();
+        app.list_state.select(Some(app.filtered.len() - 1));
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("row-29"), "{text}");
+        assert!(text.contains("row-27"), "{text}");
+        assert!(!text.contains("row-00"), "{text}");
+        assert_eq!(app.list_state.selected(), Some(29));
+        let selected = text.lines().find(|l| l.contains("row-29")).unwrap();
+        assert!(selected.contains('▸'), "{selected}");
     }
 
     #[test]
