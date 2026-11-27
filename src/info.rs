@@ -503,4 +503,49 @@ mod tests {
             assert_eq!(local_string(i64::MIN), "????-??-??T??:??:??");
         }
     }
+
+    /// Each separator is required on its own. A slash where the month
+    /// separator belongs, or a dot where the minute separator belongs,
+    /// is not a date an age cut may read.
+    #[test]
+    fn a_wrong_separator_is_not_a_date() {
+        assert!(parse_local_to_epoch("2026/07-03T12:00:00").is_none());
+        assert!(parse_local_to_epoch("2026-07-03T12.00:00").is_none());
+    }
+
+    /// 28 February of a common year is a real day. Dropping that arm
+    /// would make every such date unreadable.
+    #[test]
+    fn a_common_year_february_is_a_real_day() {
+        assert!(parse_local_to_epoch("2023-02-28T00:00:00").is_some());
+        assert!(parse_local_to_epoch("2023-02-01T12:00:00").is_some());
+    }
+
+    /// A value of exactly the cap is kept. One byte more is not.
+    #[test]
+    fn a_value_of_exactly_the_cap_is_kept() {
+        let v = "a".repeat(VALUE_CAP);
+        assert_eq!(kept_text(v.as_bytes()).as_deref(), Some(v.as_str()));
+        let over = "a".repeat(VALUE_CAP + 1);
+        assert!(kept_text(over.as_bytes()).is_none());
+    }
+
+    /// A regular file of exactly `cap` bytes is read whole. One more
+    /// byte is refused, and the read is not cut down to the cap.
+    #[test]
+    fn a_file_of_exactly_the_cap_is_read_whole() {
+        let dir = std::env::temp_dir().join(format!("rtrash-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("r");
+        let cap = 32u64;
+        let body = vec![b'a'; cap as usize];
+        std::fs::write(&file, &body).unwrap();
+        assert_eq!(read_bounded(&file, cap).unwrap(), body);
+        let mut over = body.clone();
+        over.push(b'b');
+        std::fs::write(&file, &over).unwrap();
+        assert!(read_bounded(&file, cap).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

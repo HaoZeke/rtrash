@@ -1540,4 +1540,58 @@ mod tests {
             info::now_epoch() - 3600
         ));
     }
+
+    fn lock_info(root: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let info = root.join("info");
+        let mut mode = fs::metadata(&info).unwrap().permissions();
+        mode.set_mode(0o555);
+        fs::set_permissions(&info, mode).unwrap();
+    }
+
+    fn unlock_info(root: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let info = root.join("info");
+        let mut mode = fs::metadata(&info).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&info, mode).unwrap();
+    }
+
+    /// The payload can go and the record cannot. That is a failed empty:
+    /// the record stays, and the run is not a success.
+    #[test]
+    fn an_unwritable_record_dir_fails_an_age_empty() {
+        let root = old_trash("info-ro", &["a"]);
+        lock_info(&root);
+        let argv = vec![
+            "--plain".to_string(),
+            format!("--trash-dir={}", root.display()),
+            "1".to_string(),
+        ];
+        let code = run_inner("rtrash", &argv);
+        unlock_info(&root);
+        assert_ne!(code, 0);
+        assert!(root.join("info/a.trashinfo").exists());
+        assert!(!root.join("files/a").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `empty PATH` has the same rule: a record that stays is not a
+    /// success, even though the payload is already gone.
+    #[test]
+    fn an_unwritable_record_dir_fails_an_exact_empty() {
+        let root = old_trash("exact-ro", &["a"]);
+        lock_info(&root);
+        let argv = vec![
+            "--plain".to_string(),
+            format!("--trash-dir={}", root.display()),
+            "/tmp/a".to_string(),
+        ];
+        let code = run_inner("rtrash", &argv);
+        unlock_info(&root);
+        assert_ne!(code, 0);
+        assert!(root.join("info/a.trashinfo").exists());
+        assert!(!root.join("files/a").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
 }
