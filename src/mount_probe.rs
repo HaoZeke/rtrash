@@ -201,14 +201,23 @@ mod tests {
         assert_eq!(got, Some(PathBuf::from("/")));
     }
 
+    /// The give-up bound is latched on the first network look. Both tests
+    /// pin it first, so a parallel run still waits 0.2 s rather than 3.
+    fn pin_mount_wait() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| std::env::set_var("RTRASH_MOUNT_WAIT", "0.2"));
+    }
+
     #[test]
     fn a_network_look_that_answers_is_kept() {
+        pin_mount_wait();
         let got = probe_typed(Path::new("/"), "nfs4", |p| p.as_os_str().len());
         assert_eq!(got, Some(1));
     }
 
     #[test]
     fn a_network_look_that_never_answers_is_given_up() {
+        pin_mount_wait();
         let start = std::time::Instant::now();
         let got = probe_typed(Path::new("/nowhere"), "nfs", |_| {
             std::thread::sleep(Duration::from_secs(3600));

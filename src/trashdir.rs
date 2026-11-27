@@ -6609,12 +6609,13 @@ proc /proc proc rw 0 0
     }
 
     /// Levels for the deep copy. macOS CI hung past 25 minutes at 20,000,
-    /// so that runner stops at 1,000. Either depth is past `PATH_MAX`.
+    /// so that runner stops at 1,000. Elsewhere 4096 is still past
+    /// `PATH_MAX` and past the old 2 MiB stack.
     #[cfg(unix)]
     const DEEP_COPY: usize = if cfg!(target_os = "macos") {
         1_000
     } else {
-        20_000
+        4_096
     };
 
     /// A chain of `levels` directories named `d` under `root`, with `leaf`

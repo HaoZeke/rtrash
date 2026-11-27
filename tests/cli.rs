@@ -1812,24 +1812,35 @@ fn mass_pattern_keeps_the_trash(tag: &str, args: &[&str]) {
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("keep.txt");
     let put = sb.run(&["put", &pin, "keep.txt"]);
-    assert!(put.status.success(), "{}", stderr_of(&put));
+    assert!(put.status.success(), "{tag} {args:?}: {}", stderr_of(&put));
     let mut cmd = vec!["rm", pin.as_str()];
     cmd.extend_from_slice(args);
     let out = sb.run(&cmd);
     let err = stderr_of(&out);
-    assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("refusing mass pattern"), "{err}");
-    assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
+    assert_eq!(out.status.code(), Some(2), "{tag} {args:?}: {err}");
+    assert!(
+        err.contains("refusing mass pattern"),
+        "{tag} {args:?}: {err}"
+    );
+    assert_eq!(
+        trash_names(&sb),
+        vec!["keep.txt".to_string()],
+        "{tag} {args:?}"
+    );
 }
 
 #[test]
-fn question_star_is_refused_without_force() {
-    mass_pattern_keeps_the_trash("rm-mass-qstar", &["--glob", "?*"]);
-}
-
-#[test]
-fn a_regex_dot_is_refused_without_force() {
-    mass_pattern_keeps_the_trash("rm-mass-dot", &["--regex", "."]);
+fn mass_patterns_are_refused_without_force() {
+    for (tag, args) in [
+        ("rm-mass-qstar", &["--glob", "?*"][..]),
+        ("rm-mass-dot", &["--regex", "."][..]),
+        ("rm-mass-slashslash", &["--prefix", "//"][..]),
+        ("rm-mass-slashdot", &["--prefix", "/."][..]),
+        ("rm-mass-dotdot", &["--prefix", "/tmp/.."][..]),
+        ("rm-mass-tilde", &["--prefix", "~"][..]),
+    ] {
+        mass_pattern_keeps_the_trash(tag, args);
+    }
 }
 
 #[test]
@@ -1843,26 +1854,6 @@ fn an_empty_prefix_is_refused_without_force() {
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("'' is not a path"), "{err}");
     assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
-}
-
-#[test]
-fn slash_slash_is_refused_without_force() {
-    mass_pattern_keeps_the_trash("rm-mass-slashslash", &["--prefix", "//"]);
-}
-
-#[test]
-fn slash_dot_is_refused_without_force() {
-    mass_pattern_keeps_the_trash("rm-mass-slashdot", &["--prefix", "/."]);
-}
-
-#[test]
-fn a_prefix_that_climbs_to_the_root_is_refused_without_force() {
-    mass_pattern_keeps_the_trash("rm-mass-dotdot", &["--prefix", "/tmp/.."]);
-}
-
-#[test]
-fn tilde_is_refused_without_force() {
-    mass_pattern_keeps_the_trash("rm-mass-tilde", &["--prefix", "~"]);
 }
 
 #[test]
@@ -2272,28 +2263,16 @@ fn refuse_unknown_regex_scope(tag: &str, dir_name: &str, mode: &str) {
 }
 
 #[test]
-fn a_regex_directory_with_a_dot_is_refused_without_scope_roots() {
-    refuse_unknown_regex_scope("rm-regex-dot-dir", "work.with.dot", "raw");
-}
-
-#[test]
-fn an_escaped_regex_directory_with_a_dot_is_refused_without_scope_roots() {
-    refuse_unknown_regex_scope("rm-regex-escaped-dot", "work.with.dot", "escaped");
-}
-
-#[test]
-fn a_regex_hidden_directory_is_refused_without_scope_roots() {
-    refuse_unknown_regex_scope("rm-regex-hidden", ".config", "raw");
-}
-
-#[test]
-fn an_escaped_regex_hidden_directory_is_refused_without_scope_roots() {
-    refuse_unknown_regex_scope("rm-regex-escaped-hidden", ".config", "escaped");
-}
-
-#[test]
-fn a_regex_directory_below_a_wildcard_parent_is_refused_without_scope_roots() {
-    refuse_unknown_regex_scope("rm-regex-wild-parent", "work", "parent-wildcard");
+fn regex_directories_outside_known_roots_are_refused_without_scope_roots() {
+    for (tag, dir_name, mode) in [
+        ("rm-regex-dot-dir", "work.with.dot", "raw"),
+        ("rm-regex-escaped-dot", "work.with.dot", "escaped"),
+        ("rm-regex-hidden", ".config", "raw"),
+        ("rm-regex-escaped-hidden", ".config", "escaped"),
+        ("rm-regex-wild-parent", "work", "parent-wildcard"),
+    ] {
+        refuse_unknown_regex_scope(tag, dir_name, mode);
+    }
 }
 
 #[test]
@@ -2398,27 +2377,19 @@ fn remove_only_objects_without_scope_roots(tag: &str, flag: &str, pattern: &str,
         .output()
         .unwrap();
     assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
-    assert_eq!(trash_names(&sb), vec!["outside.txt".to_string()]);
+    assert_eq!(trash_names(&sb), vec!["outside.txt".to_string()], "{tag}");
 }
 
 #[test]
-fn a_basename_glob_can_remove_the_only_objects_below_a_directory() {
-    remove_only_objects_without_scope_roots("rm-objects-glob", "--glob", "*.o", false);
-}
-
-#[test]
-fn a_forced_basename_regex_can_remove_the_only_objects_below_a_directory() {
-    remove_only_objects_without_scope_roots("rm-objects-regex", "--regex", r"\.o$", false);
-}
-
-#[test]
-fn a_basename_glob_can_remove_objects_from_separate_subdirectories() {
-    remove_only_objects_without_scope_roots("rm-nested-objects-glob", "--glob", "*.o", true);
-}
-
-#[test]
-fn a_forced_basename_regex_can_remove_objects_from_separate_subdirectories() {
-    remove_only_objects_without_scope_roots("rm-nested-objects-regex", "--regex", r"\.o$", true);
+fn basename_patterns_remove_only_object_files_without_scope_roots() {
+    for (tag, flag, pattern, nested) in [
+        ("rm-objects-glob", "--glob", "*.o", false),
+        ("rm-objects-regex", "--regex", r"\.o$", false),
+        ("rm-nested-objects-glob", "--glob", "*.o", true),
+        ("rm-nested-objects-regex", "--regex", r"\.o$", true),
+    ] {
+        remove_only_objects_without_scope_roots(tag, flag, pattern, nested);
+    }
 }
 
 #[test]
