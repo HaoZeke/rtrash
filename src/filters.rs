@@ -948,8 +948,17 @@ impl RmSummary {
 mod pattern_tests {
     use super::{Match, Patterns};
 
+    /// An absolute home for this thread. It does not have to exist, and
+    /// the checks below do not read `HOME`.
+    fn pin_home() -> crate::util::HomeOverride {
+        crate::util::override_home(Some(
+            std::env::temp_dir().join("rtrash-pattern-home-absent"),
+        ))
+    }
+
     #[test]
     fn regex_patterns_search_the_whole_path() {
+        let _home = pin_home();
         let p = Patterns::new(vec![r"/old-[0-9]+/".into()], Match::Regex).unwrap();
         assert!(p.hit("/home/u/old-42/a.txt", "a.txt", "a.txt"));
         assert!(!p.hit("/home/u/old-x/a.txt", "a.txt", "a.txt"));
@@ -976,6 +985,7 @@ mod pattern_tests {
 
     #[test]
     fn substring_and_exact_match_the_original_path() {
+        let _home = pin_home();
         let sub = Patterns::new(vec!["old-pro".into()], Match::Substring).unwrap();
         assert!(sub.hit("/home/u/old-project/a", "a", "a"));
         assert!(!sub.hit("/home/u/new/a", "a", "a"));
@@ -1018,6 +1028,7 @@ mod pattern_tests {
 
     #[test]
     fn drive_root_prefixes_are_mass() {
+        let _home = pin_home();
         for p in [
             r"C:\", "C:/", "c:\\", "D:", r"\\?\C:\", r"\\?\C:/", r"\\?\d:",
         ] {
@@ -1088,9 +1099,7 @@ mod pattern_tests {
 
     #[test]
     fn tilde_is_the_home_root() {
-        if crate::util::home_dir().is_none() {
-            return;
-        }
+        let _home = pin_home();
         assert!(Patterns::new(vec!["~".into()], Match::Prefix)
             .unwrap()
             .is_mass());
@@ -1103,9 +1112,8 @@ mod pattern_tests {
 
     #[test]
     fn a_trash_root_alias_is_mass() {
-        let Some(home) = crate::util::home_dir() else {
-            return;
-        };
+        let _home = pin_home();
+        let home = crate::util::home_dir().expect("pinned home");
         let trash = home.join(".local/share/Trash");
         let alias = format!("{}/.", trash.display());
         assert!(Patterns::new(vec![alias], Match::Prefix).unwrap().is_mass());
@@ -1150,6 +1158,7 @@ mod pattern_tests {
 
     #[test]
     fn a_regex_that_matches_every_path_is_mass() {
+        let _home = pin_home();
         for mass in ["/", "^/", "..", ".{2}", r"\\"] {
             assert!(
                 Patterns::new(vec![mass.into()], Match::Regex)
@@ -1179,6 +1188,7 @@ mod pattern_tests {
 
     #[test]
     fn a_glob_that_matches_every_path_is_mass() {
+        let _home = pin_home();
         for mass in ["/?*", "/*?", "**/?*", "*/?*", "?:\\*"] {
             assert!(
                 Patterns::new(vec![mass.into()], Match::Glob)
@@ -1223,6 +1233,7 @@ mod pattern_tests {
 
     #[test]
     fn a_selection_of_every_entry_under_a_scope_is_mass() {
+        let _home = pin_home();
         let star = Patterns::new(vec!["*".into()], Match::Glob).unwrap();
         let files = vec![std::path::PathBuf::from("/tmp/proj/a.txt")];
         assert!(super::selection_covers_scope(&star, &files, &files));
