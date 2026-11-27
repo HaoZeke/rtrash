@@ -1010,6 +1010,7 @@ mod pattern_tests {
 
     #[test]
     fn exact_match_ignores_globs_and_duplicate_basenames() {
+        let _home = pin_home();
         let star = Patterns::new(vec!["/w/*.log".into()], Match::Exact).unwrap();
         assert!(star.hit("/w/*.log", "*.log", "*.log"));
         assert!(!star.hit("/w/notes.log", "notes.log", "notes.log"));
@@ -1057,6 +1058,7 @@ mod pattern_tests {
 
     #[test]
     fn a_glob_of_question_star_matches_every_name() {
+        let _home = pin_home();
         assert!(Patterns::new(vec!["?*".into()], Match::Glob)
             .unwrap()
             .is_mass());
@@ -1064,6 +1066,7 @@ mod pattern_tests {
 
     #[test]
     fn a_regex_dot_matches_every_nonempty_path() {
+        let _home = pin_home();
         assert!(Patterns::new(vec![".".into()], Match::Regex)
             .unwrap()
             .is_mass());
@@ -1071,6 +1074,7 @@ mod pattern_tests {
 
     #[test]
     fn an_empty_prefix_matches_every_path() {
+        let _home = pin_home();
         assert!(Patterns::new(vec![String::new()], Match::Prefix)
             .unwrap()
             .is_mass());
@@ -1078,6 +1082,7 @@ mod pattern_tests {
 
     #[test]
     fn slash_slash_is_a_root_prefix() {
+        let _home = pin_home();
         assert!(Patterns::new(vec!["//".into()], Match::Prefix)
             .unwrap()
             .is_mass());
@@ -1085,6 +1090,7 @@ mod pattern_tests {
 
     #[test]
     fn slash_dot_is_a_root_prefix() {
+        let _home = pin_home();
         assert!(Patterns::new(vec!["/.".into()], Match::Prefix)
             .unwrap()
             .is_mass());
@@ -1092,6 +1098,7 @@ mod pattern_tests {
 
     #[test]
     fn a_dot_dot_prefix_that_climbs_to_the_root_is_mass() {
+        let _home = pin_home();
         assert!(Patterns::new(vec!["/tmp/..".into()], Match::Prefix)
             .unwrap()
             .is_mass());
