@@ -189,11 +189,34 @@ pub struct RootSummary {
 
 /// Per-root rows, total items and total bytes of `dirs`, as [`print_status`]
 /// shows them. Ages are seconds; `size` is the larger/smaller filter.
+/// Walked directory sizes are written back into `directorysizes`.
 pub fn summarize_dirs(
     dirs: &[TrashDir],
     older_than: Option<i64>,
     newer_than: Option<i64>,
     size: list::SizeFilter,
+) -> (Vec<RootSummary>, u64, u64) {
+    summarize(dirs, older_than, newer_than, size, true)
+}
+
+/// [`summarize_dirs`] without taking the trash lock or rewriting
+/// `directorysizes`. `rtrash-hud` uses this so a display cannot create
+/// `.rtrash.lock` or change a cache, including a stale one.
+pub fn summarize_dirs_readonly(
+    dirs: &[TrashDir],
+    older_than: Option<i64>,
+    newer_than: Option<i64>,
+    size: list::SizeFilter,
+) -> (Vec<RootSummary>, u64, u64) {
+    summarize(dirs, older_than, newer_than, size, false)
+}
+
+fn summarize(
+    dirs: &[TrashDir],
+    older_than: Option<i64>,
+    newer_than: Option<i64>,
+    size: list::SizeFilter,
+    write_back: bool,
 ) -> (Vec<RootSummary>, u64, u64) {
     let mut roots = Vec::new();
     let mut total_items = 0u64;
@@ -204,8 +227,9 @@ pub fn summarize_dirs(
             older_than,
             newer_than,
         );
-        // One read of the cache per root; walked directories are written
-        // back at the end, so the next status is a lookup.
+        // One read of the cache per root. `rtrash status` writes walked
+        // directories back, so the next status is a lookup. A read-only
+        // caller keeps the cache as it was.
         let sizes = trashdir::DirSizes::load(dir);
         let mut each: Vec<u64> = {
             use rayon::prelude::*;
@@ -214,7 +238,9 @@ pub fn summarize_dirs(
                 .map(|e| sizes.entry_bytes(&e.name))
                 .collect()
         };
-        sizes.write_back();
+        if write_back {
+            sizes.write_back();
+        }
         if size.is_set() {
             let mut kept = each.iter();
             entries.retain(|_| kept.next().is_some_and(|&n| size.keeps(n)));

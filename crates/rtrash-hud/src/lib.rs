@@ -1,7 +1,8 @@
 //! Trash size and item count for a desktop status display.
 //!
-//! The numbers come from [`rtrash::status::summarize_dirs`], the same count
-//! `rtrash status` prints. This crate does not read `.trashinfo` files.
+//! The numbers come from [`rtrash::status::summarize_dirs_readonly`], the
+//! same count `rtrash status` prints. This crate does not read
+//! `.trashinfo` files, and it does not lock or rewrite a trash.
 
 use std::path::PathBuf;
 
@@ -10,23 +11,29 @@ use rtrash::util::{format_bytes, json_escape, plural, term_path};
 const HELP: &str = "\
 Usage: rtrash-hud [OPTION]...
 Show each trash's item count and reclaimable size, the same numbers as
-`rtrash status`. Prints them and exits (a desktop status display, not a
-window). The count comes from the rtrash library; this program does not
-parse .trashinfo files.
+`rtrash status`, and exit. The count comes from the rtrash library; this
+program does not parse .trashinfo files. It does not take the trash lock
+or rewrite directorysizes. It has no age filter (`rtrash status
+--older-than` does).
 
 With no --trash-dir, discovery matches `rtrash status`. On macOS, where
-the Finder Trash is the default, pass --trash-dir or choose the
-FreeDesktop home trash. This display does not read the Finder Trash or
-the Recycle Bin.
+the Finder Trash is the default, pass --trash-dir or set
+RTRASH_MACOS_TRASH=freedesktop (macos.trash = \"freedesktop\" in the
+config). This display does not read the Finder Trash or the Recycle Bin.
 
       --trash-dir=PATH  only this trash directory (repeatable);
                      --trash-dir PATH is accepted too
       --home-only       only the home trash, when no --trash-dir is given
-      --json            print one JSON object (items, bytes, roots)
-      --offline         print the totals and exit (this is the only mode)
+      --json            one JSON object: items, bytes, and roots
+                     (path, items, bytes, orphans, dangling). These are
+                     not the status --json names (total_items,
+                     total_bytes, and the fs_* fields)
   -h, --help            display this help and exit
   -V, --version         output version information and exit
 ";
+
+/// The two lines `rtrash status` writes to stderr when it finds no trash.
+const NO_TRASH: &str = "No trash directories found\nTotal: 0 items (0 B)\n";
 
 /// One trash root in a [`Snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +94,6 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             "-h" | "--help" => return Ok(Parsed::Help),
             "-V" | "--version" => return Ok(Parsed::Version),
             "--json" => json = true,
-            "--offline" => {}
             "--home-only" => home_only = true,
             "--trash-dir" => {
                 i += 1;
@@ -132,7 +138,8 @@ fn load(pins: &[PathBuf], home_only: bool) -> Result<Snapshot, String> {
     if rtrash::finder::is_default(!pins.is_empty()) {
         return Err(concat!(
             "the Finder Trash is the default here; ",
-            "pin --trash-dir or set the FreeDesktop home trash"
+            "pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop ",
+            "(or macos.trash = \"freedesktop\")"
         )
         .into());
     }
@@ -140,8 +147,12 @@ fn load(pins: &[PathBuf], home_only: bool) -> Result<Snapshot, String> {
     if dirs.is_empty() && !pins.is_empty() {
         return Err("no valid --trash-dir pins".into());
     }
-    let (rows, items, bytes) =
-        rtrash::status::summarize_dirs(&dirs, None, None, rtrash::list::SizeFilter::default());
+    let (rows, items, bytes) = rtrash::status::summarize_dirs_readonly(
+        &dirs,
+        None,
+        None,
+        rtrash::list::SizeFilter::default(),
+    );
     if rows.len() != dirs.len() {
         return Err("status summary did not cover every trash".into());
     }
@@ -179,10 +190,11 @@ fn notes(row: &RootTotal) -> String {
 }
 
 /// The text table, one trash per line, then the total. A trailing newline
-/// is included. An empty discovery says that no trash directory was found.
+/// is included. An empty discovery is an empty string: [`run_with`] writes
+/// [`NO_TRASH`] to stderr, as `rtrash status` does.
 pub fn render(snap: &Snapshot) -> String {
     if snap.roots.is_empty() {
-        return "No trash directories found\nTotal: 0 items (0 B)\n".into();
+        return String::new();
     }
     let mut out = String::new();
     for row in &snap.roots {
@@ -202,7 +214,10 @@ pub fn render(snap: &Snapshot) -> String {
     out
 }
 
-/// One JSON object: `items`, `bytes`, and `roots`. No trailing newline.
+/// One JSON object: `items`, `bytes`, and `roots` (each root has `path`,
+/// `items`, `bytes`, `orphans` and `dangling`). No trailing newline.
+/// `rtrash status --json` uses `total_items`, `total_bytes` and `fs_*`
+/// instead.
 pub fn render_json(snap: &Snapshot) -> String {
     let roots: Vec<String> = snap
         .roots
@@ -254,6 +269,8 @@ pub fn run_with(args: &[String]) -> i32 {
             Ok(snap) => {
                 if args.json {
                     println!("{}", render_json(&snap));
+                } else if snap.roots.is_empty() {
+                    eprint!("{NO_TRASH}");
                 } else {
                     print!("{}", render(&snap));
                 }
@@ -277,18 +294,22 @@ mod tests {
     }
 
     #[test]
-    fn help_names_the_count_and_the_offline_flag() {
+    fn help_names_the_count_and_the_freedesktop_switch() {
         assert!(HELP.contains("rtrash status"));
-        assert!(HELP.contains("--offline"));
+        assert!(HELP.contains("item count and reclaimable size"));
         assert!(HELP.contains("--trash-dir"));
         assert!(HELP.contains("--json"));
         assert!(HELP.contains("does not"));
+        assert!(HELP.contains("RTRASH_MACOS_TRASH=freedesktop"));
+        assert!(HELP.contains("macos.trash"));
+        assert!(HELP.contains("no age filter"));
+        assert!(HELP.contains("total_items"));
+        assert!(!HELP.contains("--offline"));
     }
 
     #[test]
     fn parse_pins_home_and_json() {
         let parsed = parse(&[
-            "--offline".into(),
             "--home-only".into(),
             "--json".into(),
             "--trash-dir=/tmp/one".into(),
@@ -314,6 +335,9 @@ mod tests {
         assert_eq!(parse(&["--help".into()]).unwrap(), Parsed::Help);
         assert_eq!(parse(&["-V".into()]).unwrap(), Parsed::Version);
         assert!(parse(&["--nope".into()]).unwrap_err().contains("--nope"));
+        assert!(parse(&["--offline".into()])
+            .unwrap_err()
+            .contains("--offline"));
         assert!(parse(&["--trash-dir".into()])
             .unwrap_err()
             .contains("requires a PATH"));
@@ -364,14 +388,15 @@ mod tests {
     }
 
     #[test]
-    fn render_of_no_trash_says_so() {
+    fn render_of_no_trash_is_empty() {
         let snap = Snapshot {
             roots: Vec::new(),
             items: 0,
             bytes: 0,
         };
+        assert_eq!(render(&snap), "");
         assert_eq!(
-            render(&snap),
+            NO_TRASH,
             "No trash directories found\nTotal: 0 items (0 B)\n"
         );
     }
@@ -419,15 +444,17 @@ mod tests {
             .unwrap();
         }
 
-        fn library(root: &PathBuf) -> (u64, u64) {
+        fn rows(root: &PathBuf) -> Vec<rtrash::status::RootSummary> {
             let dirs = rtrash::trashdir::resolve_dirs_opts(std::slice::from_ref(root), false);
-            let (_rows, items, bytes) = rtrash::status::summarize_dirs(
+            let (rows, items, bytes) = rtrash::status::summarize_dirs_readonly(
                 &dirs,
                 None,
                 None,
                 rtrash::list::SizeFilter::default(),
             );
-            (items, bytes)
+            assert_eq!(rows.iter().map(|r| r.items).sum::<u64>(), items);
+            assert_eq!(rows.iter().map(|r| r.bytes).sum::<u64>(), bytes);
+            rows
         }
 
         #[test]
@@ -436,7 +463,9 @@ mod tests {
             let snap = snapshot(std::slice::from_ref(&tmp.0), false).unwrap();
             assert_eq!(snap.roots.len(), 1);
             assert_eq!((snap.items, snap.bytes), (0, 0));
-            assert_eq!((snap.items, snap.bytes), library(&tmp.0));
+            let got = rows(&tmp.0);
+            assert_eq!(got.len(), 1);
+            assert_eq!((got[0].items, got[0].bytes), (0, 0));
             let text = render(&snap);
             assert!(text.contains("0 items"), "{text}");
             assert!(!text.contains("No trash directories found"), "{text}");
@@ -448,16 +477,62 @@ mod tests {
             record(&tmp.0, "hello.txt", b"hello-payload");
             fs::write(tmp.0.join("files").join("loose.txt"), b"orphan-payload").unwrap();
             let snap = snapshot(&[tmp.0.clone(), tmp.0.clone()], true).unwrap();
-            let (items, bytes) = library(&tmp.0);
+            let got = rows(&tmp.0);
             assert_eq!(snap.roots.len(), 1, "a trash pinned twice is one trash");
             assert_eq!(snap.items, 2, "the orphan counts, as status counts it");
-            assert_eq!((snap.items, snap.bytes), (items, bytes));
+            assert_eq!(snap.roots[0].items, got[0].items);
+            assert_eq!(snap.roots[0].bytes, got[0].bytes);
+            assert_eq!(snap.roots[0].orphans, got[0].orphans);
+            assert_eq!(snap.roots[0].dangling, got[0].dangling);
             assert!(snap.bytes > 0, "a payload takes some disk");
             assert_eq!(snap.roots[0].orphans, 1);
             let text = render(&snap);
             assert!(text.contains("2 items"), "{text}");
             assert!(text.contains("1 without .trashinfo"), "{text}");
-            assert!(text.contains(&format_bytes(snap.bytes)), "{text}");
+            assert!(text.contains(&format_bytes(snap.roots[0].bytes)), "{text}");
+        }
+
+        /// Zeroing one root field must fail this: the row is the status row.
+        #[test]
+        fn each_root_field_matches_status_including_dangling() {
+            let tmp = Tmp::trash("dangling");
+            record(&tmp.0, "gone.txt", b"gone-payload");
+            fs::remove_file(tmp.0.join("files").join("gone.txt")).unwrap();
+            let snap = snapshot(std::slice::from_ref(&tmp.0), false).unwrap();
+            let got = rows(&tmp.0);
+            assert_eq!(snap.roots.len(), 1);
+            assert_eq!(snap.roots[0].items, got[0].items);
+            assert_eq!(snap.roots[0].bytes, got[0].bytes);
+            assert_eq!(snap.roots[0].orphans, got[0].orphans);
+            assert_eq!(snap.roots[0].dangling, got[0].dangling);
+            assert!(snap.roots[0].dangling >= 1, "{:?}", snap.roots[0].dangling);
+            assert!(snap.roots[0].bytes > 0, "the record itself takes space");
+            let text = render(&snap);
+            assert!(text.contains("without a payload"), "{text}");
+            assert!(text.contains(&format_bytes(snap.roots[0].bytes)), "{text}");
+        }
+
+        /// A payload symlink counts as the link, not the file it names.
+        #[test]
+        fn a_payload_symlink_counts_as_the_link() {
+            let tmp = Tmp::trash("payload-link");
+            let outside = tmp.0.join("outside-big");
+            fs::write(&outside, vec![b'x'; 1_000_000]).unwrap();
+            std::os::unix::fs::symlink(&outside, tmp.0.join("files").join("link")).unwrap();
+            fs::write(
+                tmp.0.join("info").join("link.trashinfo"),
+                "[Trash Info]\nPath=/tmp/link\nDeletionDate=2026-01-02T03:04:05\n",
+            )
+            .unwrap();
+            let snap = snapshot(std::slice::from_ref(&tmp.0), false).unwrap();
+            assert_eq!(snap.items, 1);
+            assert!(
+                snap.bytes < 100_000,
+                "counted the link target: {} bytes",
+                snap.bytes
+            );
+            assert_eq!(snap.bytes, rows(&tmp.0)[0].bytes);
+            assert_eq!(fs::metadata(&outside).unwrap().len(), 1_000_000);
         }
 
         #[test]
