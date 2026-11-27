@@ -118,7 +118,7 @@ Warm runs: 2 warmups and 10 timed runs. Cold runs: 3, each after dropping the pa
 | synthetic | 500000 | 1101 |
 
 Mean wall time in milliseconds, ± one standard deviation.
-"Before" means rtrash 0.1.4 at `242a601`, and "after" means the current tree.
+"Before" means rtrash 0.1.4 at `242a601`, and "after" was recorded against rtrash 0.1.4.
 
 | Tree, cache | `rtrash du` before | `rtrash du` after | `--no-git` after | du -s | diskus | dust | dua | pdu | gdu |
 |:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|

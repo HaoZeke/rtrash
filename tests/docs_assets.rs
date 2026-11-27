@@ -179,8 +179,9 @@ fn readme_documents_release_or_binary_path() {
     );
 }
 
-// Retired rows are named by these labels. Times such as `0.21 s` and ratios
-// such as `2.5x` also occur in sourced cells (`12.5x` contains `2.5x`), and
+// Retired rows are named by these labels. `0.21 s` is a real du --inodes
+// cell on both benchmark pages, so it is not a token. The `2.5x` / `12.5x`
+// pair is only a boundary example in the test; the pages use ~13.6× and ~12×.
 // "not continuously re-verified" is the old caveat, not a row.
 const RETIRED_ROW_TOKENS: [&str; 4] = ["100 000 entries", "20 000 entries", "52x", "52×"];
 
@@ -195,6 +196,14 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
     assert!(
         !performance.contains("mainly wins on process startup"),
         "the Performance section must not keep the unsourced startup claim"
+    );
+    assert!(
+        !performance.contains("older README table"),
+        "the Performance section must not refer to a table that is not on the page"
+    );
+    assert!(
+        performance.contains("how full empty deletes"),
+        "the Performance section must point at the empty-walk notes on the page"
     );
     let benches = read("docs/benchmarks.md");
     let org = read("docs/orgmode/benchmarks.org");
@@ -262,7 +271,22 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
     assert!(!benches.contains("build host for this tree"));
     // cog.toml bumps Cargo.toml, pyproject.toml, and conf.py. It leaves this page.
     assert_ne!(crate_version(), table_ver);
-    assert!(org.contains("The table below is still rtrash 0.1.2"));
+    let org_note = org
+        .lines()
+        .find(|line| line.contains("The table below is still"))
+        .expect("org table note");
+    let org_cell = org
+        .lines()
+        .find(|line| line.starts_with('|') && line.contains("release"))
+        .expect("org release cell");
+    let note_ver = rtrash_version_token(org_note).expect("org note names rtrash");
+    let cell_ver = rtrash_version_token(org_cell).expect("org cell names rtrash");
+    assert_eq!(note_ver, "0.1.2", "the org sentence stays the token 0.1.2");
+    assert_eq!(
+        cell_ver, note_ver,
+        "the org release cell must use the sentence's rtrash version"
+    );
+    assert_ne!(rtrash_version_token("rtrash 0.1.20 release"), Some("0.1.2"));
     assert!(
         has_token(&benches, "0.21 s"),
         "sourced du --inodes cell stays"
@@ -271,34 +295,106 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
         has_token(&org, "0.21 s"),
         "sourced org du --inodes cell stays"
     );
+    assert!(
+        dates_missing_from_headings(&benches).is_empty(),
+        "markdown names a later-section date that is not a heading: {:?}",
+        dates_missing_from_headings(&benches)
+    );
+    assert!(
+        dates_missing_from_headings(&org).is_empty(),
+        "org names a later-section date that is not a heading: {:?}",
+        dates_missing_from_headings(&org)
+    );
+    for (label, text) in [
+        ("docs/benchmarks.md", &benches),
+        ("docs/orgmode/benchmarks.org", &org),
+    ] {
+        assert!(text.contains("n_small=400"), "{label}");
+        assert!(text.contains("ASV params 50/200"), "{label}");
+    }
+    let after_note = benches
+        .lines()
+        .find(|line| line.contains("\"Before\" means"))
+        .expect("2026-10-10 before/after note");
+    assert!(
+        after_note.contains("recorded against rtrash 0.1.4"),
+        "the 2026-10-10 after column was recorded against rtrash 0.1.4"
+    );
+    assert!(
+        !after_note.contains("current tree"),
+        "the after column is not the current tree"
+    );
+    assert!(
+        !org.contains("2026-10-10"),
+        "the org page has no 2026-10-10 section, so it does not mirror that label"
+    );
 }
 
+// Bound: the guard starts at `## Performance` and runs to the next unfenced
+// level-1 heading (`# `, not `##` or `###`) or the end of the file. A new
+// `##` section after the Performance paragraphs stays inside the scan. A
+// fenced `## ` line does not end it.
 #[test]
 fn retired_row_tokens_ignore_longer_cells_and_inner_headings() {
     assert!(!has_token("12.5x", "2.5x"));
     assert!(!has_token("152x", "52x"));
+    assert!(!has_token("~1.52x", "52x"));
+    assert!(!has_token("~13.52x", "52x"));
+    assert!(!has_token("1.52x", "52x"));
+    assert!(!has_token("~1.52×", "52×"));
+    assert!(!has_token("~13.52×", "52×"));
+    assert!(!has_token("1.52×", "52×"));
+    assert!(!has_token("1 100 000 entries", "100 000 entries"));
+    assert!(has_token("52x", "52x"));
     assert!(has_token("| 52x |", "52x"));
+    assert!(has_token("100 000 entries", "100 000 entries"));
     assert!(has_token("0.21 s", "0.21 s"));
-    let sample = "\
-## Performance
-
-intro
-
-### Nested
-
-| `empty`, 100 000 entries | 0.92 s | 0.36 s | 2.5x |
-
-## Development
-
-20 000 entries
-";
-    let body = performance_section(sample);
+    let sample = [
+        "## Performance",
+        "",
+        "intro",
+        "",
+        "### Nested",
+        "",
+        "| `empty`, 100 000 entries | 0.92 s | 0.36 s | 2.5x |",
+        "",
+        "## Notes",
+        "",
+        "still 52x",
+        "",
+        "```",
+        "## Example",
+        "```",
+        "",
+        "after fence 52×",
+        "",
+        "# Outside",
+        "",
+        "20 000 entries",
+    ]
+    .join("\n");
+    let body = performance_section(&sample);
     assert!(has_token(body, "100 000 entries"));
-    assert!(!has_token(body, "20 000 entries"));
+    assert!(has_token(body, "52x"));
+    assert!(has_token(body, "52×"));
     assert!(body.contains("### Nested"));
+    assert!(body.contains("## Notes"));
+    assert!(body.contains("## Example"));
+    assert!(!has_token(body, "20 000 entries"));
+    let r2_org = "\
+* Measured results (Linux x86_64, 2026-07-08)
+
+Later sections of this page are other measurements, including du runs
+from 2026-10-10, 2026-10-13, and 2026-10-14.
+
+* du against dua, gdu and du (Linux x86_64, 2026-10-13)
+
+** One wide directory (2026-10-14)
+";
+    assert_eq!(dates_missing_from_headings(r2_org), vec!["2026-10-10"]);
 }
 
-// A `###` line contains the bytes `## `, but it is not the next section.
+// See `retired_row_tokens_ignore_longer_cells_and_inner_headings` for the bound.
 fn performance_section(readme: &str) -> &str {
     let marker = "## Performance\n";
     let start = readme
@@ -307,13 +403,20 @@ fn performance_section(readme: &str) -> &str {
     let rest = &readme[start + marker.len()..];
     let mut end = rest.len();
     let mut offset = 0;
+    let mut in_fence = false;
     while offset < rest.len() {
         let next = rest[offset..]
             .find('\n')
             .map(|n| offset + n + 1)
             .unwrap_or(rest.len());
         let line = rest[offset..next].trim_end_matches(['\n', '\r']);
-        if line.starts_with("## ") {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            offset = next;
+            continue;
+        }
+        if !in_fence && line.starts_with("# ") {
             end = offset;
             break;
         }
@@ -326,12 +429,110 @@ fn has_token(hay: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
+    let digit_lead = needle.chars().next().is_some_and(|c| c.is_ascii_digit());
     hay.match_indices(needle).any(|(i, _)| {
-        let before = hay[..i].chars().next_back();
         let after = hay[i + needle.len()..].chars().next();
-        let open = |c: Option<char>| c.is_none_or(|ch| !ch.is_ascii_alphanumeric());
-        open(before) && open(after)
+        if !after.is_none_or(|ch| !ch.is_ascii_alphanumeric()) {
+            return false;
+        }
+        if digit_lead && grouped_number_continues(hay, i) {
+            return false;
+        }
+        hay[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric())
     })
+}
+
+// A digit-leading token is still the same number when the character before
+// it is a digit, a decimal point, or a space that a digit groups.
+fn grouped_number_continues(hay: &str, at: usize) -> bool {
+    let mut prev = hay[..at].chars().rev();
+    let Some(first) = prev.next() else {
+        return false;
+    };
+    if first.is_ascii_digit() || first == '.' {
+        return true;
+    }
+    if first != ' ' && first != '\t' {
+        return false;
+    }
+    prev.find(|c| *c != ' ' && *c != '\t')
+        .is_some_and(|c| c.is_ascii_digit())
+}
+
+fn rtrash_version_token(text: &str) -> Option<&str> {
+    let idx = text.find("rtrash ")?;
+    let rest = &text[idx + "rtrash ".len()..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    let ver = rest[..end].trim_end_matches('.');
+    if ver.contains('.') && ver.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        Some(ver)
+    } else {
+        None
+    }
+}
+
+fn is_heading(line: &str) -> bool {
+    let Some(mark) = line.chars().next() else {
+        return false;
+    };
+    if mark != '#' && mark != '*' {
+        return false;
+    }
+    let marks = line.chars().take_while(|c| *c == mark).count();
+    line[marks..].starts_with(' ')
+}
+
+fn later_sections_sentence(text: &str) -> Option<&str> {
+    let start = text.find("Later sections of this page")?;
+    let rest = &text[start..];
+    let end = rest.find('.')?;
+    Some(&rest[..end])
+}
+
+fn iso_dates(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut dates = Vec::new();
+    let mut i = 0;
+    while i + 10 <= bytes.len() {
+        if is_iso_date(bytes, i)
+            && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric())
+            && (i + 10 == bytes.len() || !bytes[i + 10].is_ascii_alphanumeric())
+        {
+            dates.push(&text[i..i + 10]);
+            i += 10;
+        } else {
+            i += 1;
+        }
+    }
+    dates
+}
+
+fn is_iso_date(bytes: &[u8], i: usize) -> bool {
+    let s = &bytes[i..i + 10];
+    s[4] == b'-'
+        && s[7] == b'-'
+        && s[..4].iter().all(u8::is_ascii_digit)
+        && s[5..7].iter().all(u8::is_ascii_digit)
+        && s[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn dates_missing_from_headings(text: &str) -> Vec<&str> {
+    let Some(sentence) = later_sections_sentence(text) else {
+        return Vec::new();
+    };
+    iso_dates(sentence)
+        .into_iter()
+        .filter(|date| {
+            !text
+                .lines()
+                .any(|line| is_heading(line) && has_token(line, date))
+        })
+        .collect()
 }
 
 fn bold_rtrash_version(line: &str) -> Option<&str> {

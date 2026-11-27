@@ -559,7 +559,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 ## Performance
 
 Dated, reproducible numbers live in [docs/benchmarks.md](docs/benchmarks.md) (rtrash vs Python trash-cli on a 400-file fixture).
-Quote that harness. An older README table was not produced by it and is not CI-verified.
+Quote that page for those times. The paragraphs below describe how full empty deletes a trash.
 
 Full empty was further optimized for large trashcans: no pre-scan when not verbose, `d_type`-fast `unlinkat` for regular files, and **serial** wipes of the `files/` then `info/` roots with **parallel children** inside each.
 Emptying uses an in-process bulk tree delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`, not a shell-out to rsync).
