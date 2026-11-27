@@ -668,9 +668,44 @@ pub fn items_json(
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `Some(home)` while [`override_home`] is in force on this thread.
+    /// `Some(None)` is an unknown home. `None` means read the environment.
+    static TEST_HOME: std::cell::RefCell<Option<Option<std::path::PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the previous [`home_dir`] override when dropped.
+#[cfg(test)]
+#[must_use = "the home override ends when this guard drops"]
+pub struct HomeOverride {
+    prev: Option<Option<std::path::PathBuf>>,
+}
+
+#[cfg(test)]
+impl Drop for HomeOverride {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        TEST_HOME.with(|slot| *slot.borrow_mut() = prev);
+    }
+}
+
+/// Make [`home_dir`] return `home` on this thread until the guard drops.
+/// `None` is an unknown home. Other threads keep reading the environment.
+#[cfg(test)]
+pub fn override_home(home: Option<std::path::PathBuf>) -> HomeOverride {
+    let prev = TEST_HOME.with(|slot| slot.replace(Some(home)));
+    HomeOverride { prev }
+}
+
 /// The home directory from `HOME` (`USERPROFILE` on Windows), if set
 /// to an absolute path.
 pub fn home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(over) = TEST_HOME.with(|slot| slot.borrow().clone()) {
+        return over.filter(|path| path.is_absolute());
+    }
     let v = std::env::var_os("HOME").filter(|v| !v.is_empty());
     #[cfg(windows)]
     let v = v.or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()));
@@ -1047,6 +1082,19 @@ pub fn is_missing(e: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_overridden_home_stays_on_this_thread() {
+        use super::{home_dir, override_home};
+        let pinned = std::env::temp_dir().join("rtrash-pattern-home-absent");
+        let real = home_dir();
+        assert_ne!(real.as_deref(), Some(pinned.as_path()));
+        {
+            let _pin = override_home(Some(pinned.clone()));
+            assert_eq!(home_dir().as_deref(), Some(pinned.as_path()));
+        }
+        assert_eq!(home_dir(), real);
+    }
+
     /// dua #410 and #406: a long path gets the verbatim prefix in its
     /// absolute form, with its `/` and `..` resolved; a short one, a
     /// verbatim one and a device path stay as they are.
