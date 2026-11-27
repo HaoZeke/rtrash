@@ -1086,6 +1086,44 @@ pub fn is_missing(e: &io::Error) -> bool {
     )
 }
 
+/// Open `path` for reading only when it is a regular file. A symlink is
+/// refused from an lstat, and the open itself does not follow one that
+/// appears in its place (`O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT`
+/// on Windows). Cache and record reads use this so a planted link cannot
+/// be read as `directorysizes` or a `.trashinfo`.
+pub(crate) fn open_regular_nofollow(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let not_regular = || io::Error::new(io::ErrorKind::InvalidData, "not a regular file");
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.file_type().is_file() {
+        return Err(not_regular());
+    }
+    let file = open_nofollow_read(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(not_regular());
+    }
+    Ok(file)
+}
+
+fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// One blanket impl, plus one that exists only when `T: Send`.
@@ -1447,5 +1485,52 @@ mod tests {
     fn wtf8_decode_replaces_bytes_no_name_made() {
         assert_eq!(wtf8_decode(&[0xFF, 0x61]), [0xFFFD, 0x61]);
         assert_eq!(wtf8_decode(&[0xE0, 0x80, 0x80]), [0xFFFD, 0xFFFD, 0xFFFD]);
+    }
+
+    /// A symlink to a regular file is not opened. The target stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn open_regular_nofollow_refuses_a_symlink_to_a_file() {
+        let dir = std::env::temp_dir().join(format!("rtrash-nofollow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, b"secret-target").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(super::open_regular_nofollow(&link).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret-target");
+        let file = dir.join("plain");
+        std::fs::write(&file, b"plain-bytes").unwrap();
+        let mut got = Vec::new();
+        use std::io::Read;
+        super::open_regular_nofollow(&file)
+            .unwrap()
+            .read_to_end(&mut got)
+            .unwrap();
+        assert_eq!(got, b"plain-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Windows open refuses a file symlink the same way. Creating the
+    /// link needs the symlink privilege or Developer Mode.
+    #[cfg(windows)]
+    #[test]
+    fn open_regular_nofollow_refuses_a_symlink_to_a_file() {
+        let dir = std::env::temp_dir().join(format!("rtrash-nofollow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, b"secret-target").unwrap();
+        let link = dir.join("link");
+        if let Err(e) = std::os::windows::fs::symlink_file(&target, &link) {
+            panic!(
+                "cannot create a file link ({e}); this test needs the symlink \
+                 privilege or Developer Mode"
+            );
+        }
+        assert!(super::open_regular_nofollow(&link).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret-target");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

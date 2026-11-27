@@ -1,0 +1,1 @@
+A symlink planted as `directorysizes`, a `.trashinfo` record, or `.rtrash.lock` is not followed. The cache link is ignored and the size comes from a walk, a linked record is not an item, and the lock open fails instead of locking the file the link names.

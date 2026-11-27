@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
@@ -939,11 +939,14 @@ impl TrashLock {
     ) -> io::Result<Self> {
         fs::create_dir_all(root)?;
         let path = root.join(".rtrash.lock");
+        // O_NOFOLLOW: a symlink planted at the lock name is not the lock,
+        // and must not be followed into whatever it points at.
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&path)?;
         // Before the flock, which would never return.
         #[cfg(debug_assertions)]
@@ -9049,6 +9052,40 @@ proc /proc proc rw 0 0
         drop(a);
         let c = TrashLock::try_acquire(&root);
         assert!(c.is_ok());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The lock open does not follow a symlink planted at `.rtrash.lock`.
+    #[test]
+    fn the_lock_open_does_not_follow_a_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-locklink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("outside-lock");
+        fs::write(&target, b"do-not-touch").unwrap();
+        std::os::unix::fs::symlink(&target, root.join(".rtrash.lock")).unwrap();
+        let err = match TrashLock::acquire(&root) {
+            Err(err) => err,
+            Ok(_) => panic!("the lock open followed the symlink"),
+        };
+        assert!(
+            err.raw_os_error() == Some(libc::ELOOP) || err.kind() == io::ErrorKind::InvalidInput,
+            "{err}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"do-not-touch");
+        assert!(root
+            .join(".rtrash.lock")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -5100,8 +5100,10 @@ fn list_leaves_out_a_record_with_no_path_and_counts_it() {
 /// trash-list prints trash-cli's stderr line for each record trash-cli
 /// reports (no `Path=` line, a record it cannot open), in path order and
 /// before the rows, and its hint counts only the records trash-cli would
-/// list (an empty `Path=`, one over the size cap). `rtrash list` prints
-/// no such lines and counts all of them. Each record is reported once.
+/// list (an empty `Path=`, one over the size cap). A symlink is not a
+/// record, so it gets no line. `rtrash list` prints no such lines and
+/// counts every record it left out, plus names in `info/` that are not
+/// records. Each record is reported once.
 #[test]
 fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
     let sb = Sandbox::new("trash-list-errors");
@@ -5136,7 +5138,8 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
     assert!(clean.status.success(), "{}", stderr_of(&clean));
     assert_eq!(stderr_of(&clean), "");
 
-    // trash-cli reports these three.
+    // trash-cli reports the directory and the record with no Path= line.
+    // A dangling symlink is not a record, so it gets no ENOENT line.
     let nopath = info.join("nopath.txt.trashinfo");
     fs::write(&nopath, "[Trash Info]\nDeletionDate=2026-01-02T03:04:05\n").unwrap();
     let dir = info.join("d.trashinfo");
@@ -5156,25 +5159,22 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
     assert_eq!(cli.stdout, clean.stdout, "the rows stay the same");
     let err = stderr_of(&cli);
     let lines: Vec<&str> = err.lines().collect();
-    assert_eq!(lines.len(), 4, "{err}");
+    assert_eq!(lines.len(), 3, "{err}");
     assert!(lines[0].starts_with("[Errno 21] "), "{err}");
     assert!(
         lines[0].ends_with(&format!(": '{}'", dir.display())),
         "{err}"
     );
-    assert_eq!(
-        lines[1],
-        format!(
-            "[Errno 2] No such file or directory: '{}'",
-            dangling.display()
-        )
+    assert!(
+        !err.contains("dl.trashinfo"),
+        "a symlink is not opened: {err}"
     );
     assert_eq!(
-        lines[2],
+        lines[1],
         format!("Parse Error: {}: Unable to parse Path.", nopath.display())
     );
     assert_hint(
-        lines[3],
+        lines[2],
         "trash-list",
         &t,
         "2 trash records could not be listed; `rtrash status --check` shows them",
@@ -5187,7 +5187,14 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
         &stderr_of(&out),
         "rtrash list",
         &t,
-        "5 trash records could not be listed; `rtrash status --check` shows them",
+        "4 trash records could not be listed, and 1 name in info/ is not a trash record; \
+         `rtrash status --check` shows them",
+    );
+    let check = sb.run(&["status", "--check", &pin]);
+    let report = format!("{}{}", stdout_of(&check), stderr_of(&check));
+    assert!(
+        report.contains("stray:") && report.contains("dl.trashinfo"),
+        "{report}"
     );
 }
 

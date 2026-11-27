@@ -685,10 +685,11 @@ impl BinProblem {
 }
 
 /// Read a `$I` record, refusing one larger than [`I_RECORD_CAP`].
+/// A symlink is not a record: the open does not follow it.
 fn read_index(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut body = Vec::new();
-    std::fs::File::open(path)
+    crate::util::open_regular_nofollow(path)
         .and_then(|f| f.take(I_RECORD_CAP + 1).read_to_end(&mut body))
         .map_err(|e| format!("cannot be read ({e})"))?;
     if body.len() as u64 > I_RECORD_CAP {

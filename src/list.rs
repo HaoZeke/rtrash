@@ -257,8 +257,9 @@ pub struct Listing {
     pub entries: Vec<Entry>,
     pub left: Vec<Unlisted>,
     /// For each trash, in the order given: the names in its `info/` that
-    /// are not `NAME.trashinfo` (a `.DS_Store`, a temporary file), which
-    /// `status --check` reports as stray.
+    /// are not records: a name that is not `NAME.trashinfo` (a
+    /// `.DS_Store`, a temporary file), or a `NAME.trashinfo` that is a
+    /// symlink. `status --check` reports both as stray.
     pub strays: Vec<u64>,
 }
 
@@ -293,17 +294,29 @@ fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> Listing {
             continue;
         };
         let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        let records = |p: &PathBuf| {
+        let record_name = |p: &PathBuf| {
             p.file_name().is_some_and(|f| {
                 crate::util::trash_item_name(&crate::util::str_from_os_ref(f)).is_some()
             })
         };
-        strays.push(paths.iter().filter(|p| !records(p)).count() as u64);
+        // A symlink is not a record, the same as `status --check`: the
+        // name may end in `.trashinfo`, and the link is still stray.
+        let symlink =
+            |p: &PathBuf| fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+        strays.push(
+            paths
+                .iter()
+                .filter(|p| !record_name(p) || symlink(p))
+                .count() as u64,
+        );
         // One read per item: spread a big trash over the rayon pool. A
         // name that is not a record gives None.
         let read: Vec<Result<Entry, Unlisted>> = paths
             .into_par_iter()
             .filter_map(|path| {
+                if symlink(&path) {
+                    return None;
+                }
                 let fname = crate::util::str_from_os_ref(path.file_name()?);
                 let name = crate::util::trash_item_name(&fname)?;
                 Some(
@@ -545,7 +558,8 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
             .filter_map(|ent| {
                 let name = crate::util::str_from_os_ref(&ent.file_name());
                 let info = crate::util::join_info(&info_dir, &name);
-                // symlink_metadata: a dangling .trashinfo symlink still counts.
+                // The info name is present, including when it is a symlink
+                // and therefore not a record. The payload is not also an orphan.
                 if fs::symlink_metadata(&info).is_ok() {
                     return None;
                 }
@@ -1517,13 +1531,9 @@ mod tests {
             dir.starts_with("[Errno 21] ") && dir.ends_with(&shown),
             "{dir}"
         );
-        assert_eq!(
-            line("dangling.trashinfo").unwrap(),
-            format!(
-                "[Errno 2] No such file or directory: '{}'",
-                root.join("dangling.trashinfo").display()
-            )
-        );
+        // A symlink is refused as not a record, not opened and followed
+        // into a missing target (that used to report ENOENT).
+        assert!(line("dangling.trashinfo").is_none());
         assert_eq!(
             line("big.trashinfo"),
             None,
@@ -1722,6 +1732,50 @@ mod tests {
         assert!(matches!(seen[0].relock(), Err(Relock::Changed)));
         let fresh = collect(&dirs);
         assert!(fresh[0].relock().is_ok());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A `.trashinfo` symlink is not a record, for list and for the totals.
+    /// Its target is not parsed, and the payload under that name is not an
+    /// item of the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_trashinfo_is_not_a_record() {
+        let root = std::env::temp_dir().join(format!("rtrash-infolink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("files")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        fs::write(root.join("files/real.txt"), b"real").unwrap();
+        fs::write(
+            root.join("info/real.txt.trashinfo"),
+            "[Trash Info]\nPath=/tmp/real.txt\nDeletionDate=2026-01-02T03:04:05\n",
+        )
+        .unwrap();
+        let target = root.join("outside.trashinfo");
+        fs::write(
+            &target,
+            "[Trash Info]\nPath=/tmp/evil.txt\nDeletionDate=2026-01-02T03:04:05\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, root.join("info/evil.txt.trashinfo")).unwrap();
+        fs::write(root.join("files/evil.txt"), b"evil-payload").unwrap();
+        let dirs = [TrashDir {
+            root: root.clone(),
+            topdir: None,
+        }];
+        let names: Vec<String> = collect(&dirs).into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["real.txt"]);
+        let listing = collect_counted(&dirs);
+        assert_eq!(listing.strays, [1]);
+        assert!(
+            listing.left.is_empty(),
+            "a symlink is stray, not a failed record"
+        );
+        assert!(
+            orphans(&dirs).is_empty(),
+            "the symlink still occupies the name"
+        );
+        assert!(fs::read(&target).unwrap().starts_with(b"[Trash Info]\n"));
         let _ = fs::remove_dir_all(&root);
     }
 }
