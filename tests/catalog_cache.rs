@@ -55,13 +55,23 @@ impl Box {
     }
 
     fn list(&self) -> Output {
-        common::rtrash(&self.root)
-            .args(["list", &self.pin()])
+        self.list_env(&[])
+    }
+
+    fn list_env(&self, extra: &[(&str, &str)]) -> Output {
+        let mut cmd = common::rtrash(&self.root);
+        cmd.args(["list", &self.pin()])
             .current_dir(self.work())
             .env("XDG_CACHE_HOME", self.root.join(".cache"))
-            .env("RTRASH_TEST_CATALOG_LOG", self.log())
-            .output()
-            .expect("run rtrash list")
+            .env("RTRASH_TEST_CATALOG_LOG", self.log());
+        for (key, value) in extra {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("run rtrash list")
+    }
+
+    fn clear_log(&self) {
+        let _ = fs::remove_file(self.log());
     }
 
     fn put(&self, name: &str) {
@@ -384,4 +394,169 @@ fn a_recreated_record_is_not_served_from_the_catalog() {
         !text.contains(old),
         "the catalog must not replay the old path: {text}"
     );
+}
+
+/// Put the mode back on drop, so a failed command can still be cleaned up.
+struct RestoreMode {
+    path: PathBuf,
+    bits: u32,
+}
+
+impl RestoreMode {
+    fn set(path: &Path, bits: u32) -> Self {
+        let path = path.to_path_buf();
+        fs::set_permissions(&path, fs::Permissions::from_mode(bits)).unwrap();
+        RestoreMode { path, bits: 0o755 }
+    }
+}
+
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.bits));
+    }
+}
+
+fn seal(sb: &Box) {
+    sb.backdate();
+    sb.clear_log();
+    let first = sb.list();
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert_eq!(
+        blobs(&sb.cache()).len(),
+        1,
+        "list must write one sealed catalog"
+    );
+}
+
+fn assert_blob_gone(sb: &Box, why: &str) {
+    assert!(blobs(&sb.cache()).is_empty(), "{why}");
+}
+
+/// `put` drops the catalog before it tries to move the file. `files/` is
+/// not writable, so the move fails and nothing else deletes the blob.
+#[test]
+fn put_drops_the_catalog_before_the_move_can_fail() {
+    let sb = Box::open("put-drop");
+    sb.put("a.txt");
+    seal(&sb);
+    let _mode = RestoreMode::set(&sb.trash().join("files"), 0o555);
+    fs::write(sb.work().join("b.txt"), b"payload").unwrap();
+    let pin = sb.pin();
+    let out = sb.run(&["put", &pin, "b.txt"]);
+    assert!(
+        !out.status.success(),
+        "put into a read-only files/ should fail"
+    );
+    assert!(
+        sb.work().join("b.txt").is_file(),
+        "the file should stay put"
+    );
+    assert!(
+        sb.trash().join("files/a.txt").is_file(),
+        "the old item stays"
+    );
+    assert_blob_gone(&sb, "put left the catalog in place");
+}
+
+/// `restore` drops the catalog before it writes the file back.
+#[test]
+fn restore_drops_the_catalog_before_the_write_can_fail() {
+    let sb = Box::open("restore-drop");
+    sb.put("a.txt");
+    seal(&sb);
+    let dest = sb.work().join("a.txt");
+    let _mode = RestoreMode::set(&sb.work(), 0o555);
+    let pin = sb.pin();
+    let out = sb.run(&["restore", &pin, dest.to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "restore into a read-only directory should fail"
+    );
+    assert!(
+        sb.trash().join("files/a.txt").is_file(),
+        "the payload stays"
+    );
+    assert_blob_gone(&sb, "restore left the catalog in place");
+}
+
+/// `rm` drops the catalog before it removes the payload.
+#[test]
+fn rm_drops_the_catalog_before_the_payload_can_fail() {
+    let sb = Box::open("rm-drop");
+    sb.put("a.txt");
+    seal(&sb);
+    let _mode = RestoreMode::set(&sb.trash().join("files"), 0o555);
+    let dest = sb.work().join("a.txt");
+    let pin = sb.pin();
+    let out = sb.run(&["rm", &pin, dest.to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "rm of a payload that cannot be unlinked should fail"
+    );
+    assert!(
+        sb.trash().join("files/a.txt").is_file(),
+        "the payload stays"
+    );
+    assert_blob_gone(&sb, "rm left the catalog in place");
+}
+
+/// `empty PATH` is the call in `empty` that drops the catalog itself,
+/// before it removes the payload. A full empty goes through the total
+/// instead, so this test names one path.
+#[test]
+fn empty_of_a_path_drops_the_catalog_before_the_payload_can_fail() {
+    let sb = Box::open("empty-drop");
+    sb.put("a.txt");
+    seal(&sb);
+    let _mode = RestoreMode::set(&sb.trash().join("files"), 0o555);
+    let dest = sb.work().join("a.txt");
+    let pin = sb.pin();
+    let out = sb.run(&["empty", &pin, dest.to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "empty of a payload that cannot be unlinked should fail: {}",
+        stderr(&out)
+    );
+    assert!(
+        sb.trash().join("files/a.txt").is_file(),
+        "the payload stays"
+    );
+    assert_blob_gone(&sb, "empty of one path left the catalog in place");
+}
+
+#[test]
+fn no_cache_ignores_an_existing_catalog() {
+    let sb = Box::open("nocache-hit");
+    sb.put("plain.txt");
+    seal(&sb);
+    sb.clear_log();
+    let again = sb.list();
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert_eq!(
+        log_lines(&sb.log()),
+        ["hit"],
+        "the catalog is there to bypass"
+    );
+
+    for value in ["1", "TRUE", "yes"] {
+        sb.clear_log();
+        let out = sb.list_env(&[("RTRASH_NO_CACHE", value)]);
+        assert!(out.status.success(), "{value}: {}", stderr(&out));
+        assert!(stdout(&out).contains("plain.txt"), "{value}");
+        assert!(
+            !log_lines(&sb.log()).iter().any(|l| l == "hit"),
+            "{value} used the existing catalog: {:?}",
+            log_lines(&sb.log())
+        );
+        assert_eq!(
+            blobs(&sb.cache()).len(),
+            1,
+            "{value} removed the catalog instead of ignoring it"
+        );
+    }
+
+    sb.clear_log();
+    let zero = sb.list_env(&[("RTRASH_NO_CACHE", "0")]);
+    assert!(zero.status.success(), "{}", stderr(&zero));
+    assert_eq!(log_lines(&sb.log()), ["hit"], "0 leaves the catalog on");
 }

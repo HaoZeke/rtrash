@@ -320,8 +320,11 @@ fn push_children(slot: u8, dir: &Path, rows: &mut Vec<Row>) -> Option<()> {
         };
         // Records are tiny. Their hash is what a same-tick rewrite changes
         // when the coarse clock leaves mtime, ctime, inode and size alone.
-        // `files/` is not hashed: a payload there can be the user's data.
-        let hash = if slot == 2 && meta.file_type().is_file() && is_record_name(&name) {
+        // A symlink record is hashed too, through the target `read_bounded`
+        // follows, so a saved body of that target cannot hide behind a zero
+        // hash. `files/` is not hashed: a payload there can be the user's data.
+        let ft = meta.file_type();
+        let hash = if slot == 2 && is_record_name(&name) && (ft.is_file() || ft.is_symlink()) {
             hash_record(&ent.path())?
         } else {
             0
@@ -949,6 +952,11 @@ mod tests {
             strays: 0,
         };
         store_if_unchanged(&iso.dir, &before, &saved);
+        let blob = cache_path(&iso.dir).expect("blob path");
+        assert!(
+            older_than_file(&before, &fs::metadata(&blob).unwrap()),
+            "a hit requires every record mtime to be older than the blob by the coarse-clock margin"
+        );
         let loaded = load(&iso.dir).expect("hit");
         assert_eq!(loaded, saved);
         let blob = fs::read(cache_path(&iso.dir).unwrap()).unwrap();
@@ -1010,6 +1018,12 @@ mod tests {
         assert_eq!(first[0].original, PathBuf::from("/tmp/catalog-before"));
         let notes = NOTES.with(|n| n.borrow().clone());
         assert_eq!(notes, ["scan"], "the first collect reads the records");
+        let live = stamp(&iso.dir).expect("stamp");
+        let blob = cache_path(&iso.dir).expect("blob path");
+        assert!(
+            older_than_file(&live, &fs::metadata(&blob).unwrap()),
+            "a hit requires every record mtime to be older than the blob by the coarse-clock margin"
+        );
         NOTES.with(|n| n.borrow_mut().clear());
         let second = crate::list::collect(std::slice::from_ref(&iso.dir));
         assert_eq!(second[0].original, first[0].original);
@@ -1248,5 +1262,155 @@ mod tests {
         let bits = fs::symlink_metadata(&cache).unwrap().permissions().mode() & 0o777;
         assert_eq!(bits, 0o700, "storing left the directory readable by others");
         assert!(load(&iso.dir).is_some());
+    }
+
+    fn newest_mtime(dir: &TrashDir) -> std::time::SystemTime {
+        let mut newest = std::time::SystemTime::UNIX_EPOCH;
+        for root in [dir.info(), dir.files()] {
+            let seen = fs::metadata(&root).unwrap().modified().unwrap();
+            if seen > newest {
+                newest = seen;
+            }
+            for ent in fs::read_dir(&root).unwrap().flatten() {
+                let seen = ent.metadata().unwrap().modified().unwrap();
+                if seen > newest {
+                    newest = seen;
+                }
+            }
+        }
+        newest
+    }
+
+    fn set_mtime(path: &std::path::Path, modified: std::time::SystemTime) {
+        let f = fs::OpenOptions::new().read(true).open(path).unwrap();
+        let times = fs::FileTimes::new()
+            .set_accessed(modified)
+            .set_modified(modified);
+        f.set_times(times).unwrap();
+    }
+
+    fn seal_item(iso: &Isolated) {
+        let before = stamp(&iso.dir).unwrap();
+        let body = fs::read(iso.dir.info().join("item.txt.trashinfo")).unwrap();
+        store_if_unchanged(
+            &iso.dir,
+            &before,
+            &Saved {
+                records: vec![Record {
+                    name: "item.txt".into(),
+                    file_name: b"item.txt.trashinfo".to_vec(),
+                    body,
+                }],
+                strays: 0,
+            },
+        );
+        assert!(load(&iso.dir).is_some(), "the sealed catalog should hit");
+    }
+
+    /// The time gate on its own. The stamp bytes still match; only the
+    /// blob's mtime is pulled back onto the records' tick.
+    #[test]
+    fn a_blob_within_the_margin_is_not_a_hit() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "item.txt", "/tmp/catalog-before");
+        backdate_tree(&iso.dir);
+        seal_item(&iso);
+        let blob = cache_path(&iso.dir).unwrap();
+        set_mtime(&blob, newest_mtime(&iso.dir));
+        assert!(
+            load(&iso.dir).is_none(),
+            "a blob that is not older than the records by the margin was a hit"
+        );
+    }
+
+    /// The stamp compare on its own. Mtimes are put back, so the time gate
+    /// would allow a hit; the new inode and ctime are only in the stamp.
+    #[test]
+    fn a_replaced_payload_with_its_mtime_put_back_is_not_a_hit() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "item.txt", "/tmp/catalog-before");
+        backdate_tree(&iso.dir);
+        seal_item(&iso);
+        let payload = iso.dir.files().join("item.txt");
+        let info = iso.dir.info();
+        let files = iso.dir.files();
+        let payload_m = fs::metadata(&payload).unwrap().modified().unwrap();
+        let info_m = fs::metadata(&info).unwrap().modified().unwrap();
+        let files_m = fs::metadata(&files).unwrap().modified().unwrap();
+        let bytes = fs::read(&payload).unwrap();
+        fs::remove_file(&payload).unwrap();
+        fs::write(&payload, &bytes).unwrap();
+        set_mtime(&payload, payload_m);
+        set_mtime(&info, info_m);
+        set_mtime(&files, files_m);
+        assert!(
+            load(&iso.dir).is_none(),
+            "a payload replaced under the same mtime was served from the catalog"
+        );
+    }
+
+    /// `backdate_tree` follows links. The link's own mtime has to move too,
+    /// or the time gate refuses a catalog the link check was supposed to.
+    fn backdate_link(path: &std::path::Path) {
+        let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+        let dur = ago.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let ts = libc::timespec {
+            tv_sec: dur.as_secs() as _,
+            tv_nsec: dur.subsec_nanos() as _,
+        };
+        let times = [ts, ts];
+        let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+        let c = CString::new(bytes).unwrap();
+        // SAFETY: `c` is NUL-terminated and `times` is two const timespecs.
+        // AT_SYMLINK_NOFOLLOW sets the link itself, not the target.
+        let rc = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+    }
+
+    #[test]
+    fn a_symlink_record_never_seals_a_catalog() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        let link = iso.dir.info().join("link.trashinfo");
+        std::os::unix::fs::symlink("hello.txt.trashinfo", &link).unwrap();
+        backdate_tree(&iso.dir);
+        backdate_link(&link);
+        let _ = crate::list::collect(std::slice::from_ref(&iso.dir));
+        assert!(
+            !cache_path(&iso.dir).unwrap().is_file(),
+            "a symlink record was sealed"
+        );
+        NOTES.with(|n| n.borrow_mut().clear());
+        let _ = crate::list::collect(std::slice::from_ref(&iso.dir));
+        let notes = NOTES.with(|n| n.borrow().clone());
+        assert_eq!(notes, ["scan"], "a symlink record must not hit");
+    }
+
+    #[test]
+    fn an_unreadable_record_never_seals_a_catalog() {
+        let iso = Isolated::open();
+        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
+        let info = iso.dir.info().join("hello.txt.trashinfo");
+        fs::set_permissions(&info, mode(0o000)).unwrap();
+        assert!(
+            stamp(&iso.dir).is_none(),
+            "an unreadable record still produced a stamp"
+        );
+        let _ = crate::list::collect(std::slice::from_ref(&iso.dir));
+        assert!(
+            !cache_path(&iso.dir).unwrap().is_file(),
+            "an unreadable record was sealed"
+        );
+        NOTES.with(|n| n.borrow_mut().clear());
+        let _ = crate::list::collect(std::slice::from_ref(&iso.dir));
+        let notes = NOTES.with(|n| n.borrow().clone());
+        assert_eq!(notes, ["scan"], "an unreadable record must not hit");
     }
 }
