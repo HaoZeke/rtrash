@@ -587,7 +587,8 @@ fn note(kind: &'static str) {
 
 #[cfg(test)]
 thread_local! {
-    static NOTES: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NOTES: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static OVERRIDE: std::cell::RefCell<Option<(PathBuf, PathBuf)>> =
         const { std::cell::RefCell::new(None) };
 }
