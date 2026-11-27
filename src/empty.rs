@@ -1549,40 +1549,17 @@ mod tests {
         fs::set_permissions(&info, mode).unwrap();
     }
 
-    fn unlock_info(root: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-        let info = root.join("info");
-        let mut mode = fs::metadata(&info).unwrap().permissions();
-        mode.set_mode(0o755);
-        fs::set_permissions(&info, mode).unwrap();
-    }
-
-    /// True when the caller should skip. A write into this mode `0555`
-    /// directory succeeded, so the mode does not stop this process and
-    /// there is no permission error to assert.
-    fn skip_when_0555_write_succeeds(test: &str, dir: &std::path::Path) -> bool {
-        if crate::file_replace::writes_are_denied(dir) {
-            return false;
-        }
-        eprintln!(
-            "{test}: mode 0555 does not deny writes (euid {}); skipping the DAC check",
-            unsafe { libc::geteuid() }
-        );
-        true
-    }
-
     /// The payload can go and the record cannot. That is a failed empty:
     /// the record stays, and the run is not a success.
     #[test]
     fn an_unwritable_record_dir_fails_an_age_empty() {
         let root = old_trash("info-ro", &["a"]);
+        let _restore = crate::file_replace::RestoreWritable::new(root.join("info"), &root);
         lock_info(&root);
-        if skip_when_0555_write_succeeds(
+        if crate::file_replace::skip_when_0555_write_succeeds(
             "an_unwritable_record_dir_fails_an_age_empty",
             &root.join("info"),
         ) {
-            unlock_info(&root);
-            let _ = fs::remove_dir_all(&root);
             return;
         }
         let argv = vec![
@@ -1591,11 +1568,9 @@ mod tests {
             "1".to_string(),
         ];
         let code = run_inner("rtrash", &argv);
-        unlock_info(&root);
         assert_ne!(code, 0);
         assert!(root.join("info/a.trashinfo").exists());
         assert!(!root.join("files/a").exists());
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// `empty PATH` has the same rule: a record that stays is not a
@@ -1603,13 +1578,12 @@ mod tests {
     #[test]
     fn an_unwritable_record_dir_fails_an_exact_empty() {
         let root = old_trash("exact-ro", &["a"]);
+        let _restore = crate::file_replace::RestoreWritable::new(root.join("info"), &root);
         lock_info(&root);
-        if skip_when_0555_write_succeeds(
+        if crate::file_replace::skip_when_0555_write_succeeds(
             "an_unwritable_record_dir_fails_an_exact_empty",
             &root.join("info"),
         ) {
-            unlock_info(&root);
-            let _ = fs::remove_dir_all(&root);
             return;
         }
         let argv = vec![
@@ -1618,10 +1592,8 @@ mod tests {
             "/tmp/a".to_string(),
         ];
         let code = run_inner("rtrash", &argv);
-        unlock_info(&root);
         assert_ne!(code, 0);
         assert!(root.join("info/a.trashinfo").exists());
         assert!(!root.join("files/a").exists());
-        let _ = fs::remove_dir_all(&root);
     }
 }
