@@ -1557,17 +1557,11 @@ mod tests {
         fs::set_permissions(&info, mode).unwrap();
     }
 
-    /// True when creating a file in `dir` fails. Root, and anyone with
-    /// CAP_DAC_OVERRIDE, can still write a mode `0555` directory.
-    fn writes_are_denied(dir: &std::path::Path) -> bool {
-        let probe = dir.join(".dac-probe");
-        let denied = fs::write(&probe, b"x").is_err();
-        let _ = fs::remove_file(&probe);
-        denied
-    }
-
-    fn skip_without_dac(test: &str, root: &std::path::Path) -> bool {
-        if writes_are_denied(&root.join("info")) {
+    /// True when the caller should skip. A write into this mode `0555`
+    /// directory succeeded, so the mode does not stop this process and
+    /// there is no permission error to assert.
+    fn skip_when_0555_write_succeeds(test: &str, dir: &std::path::Path) -> bool {
+        if crate::file_replace::writes_are_denied(dir) {
             return false;
         }
         eprintln!(
@@ -1583,7 +1577,10 @@ mod tests {
     fn an_unwritable_record_dir_fails_an_age_empty() {
         let root = old_trash("info-ro", &["a"]);
         lock_info(&root);
-        if skip_without_dac("an_unwritable_record_dir_fails_an_age_empty", &root) {
+        if skip_when_0555_write_succeeds(
+            "an_unwritable_record_dir_fails_an_age_empty",
+            &root.join("info"),
+        ) {
             unlock_info(&root);
             let _ = fs::remove_dir_all(&root);
             return;
@@ -1607,7 +1604,10 @@ mod tests {
     fn an_unwritable_record_dir_fails_an_exact_empty() {
         let root = old_trash("exact-ro", &["a"]);
         lock_info(&root);
-        if skip_without_dac("an_unwritable_record_dir_fails_an_exact_empty", &root) {
+        if skip_when_0555_write_succeeds(
+            "an_unwritable_record_dir_fails_an_exact_empty",
+            &root.join("info"),
+        ) {
             unlock_info(&root);
             let _ = fs::remove_dir_all(&root);
             return;
