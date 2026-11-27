@@ -1131,6 +1131,8 @@ PERMANENT_ALLOW = {
     ("wsl_bin.rs", "remove_entry"): (1, RECORD),
     ("put.rs", "retarget_seam"): (1, "a debug seam replacing a symlink the test created, "
                                      "not a trash item"),
+    ("util.rs", "nofollow_swap_seam"): (1, "a debug seam replacing a fixture file with a symlink "
+                                           "after the lstat, not a trash item"),
     ("win_recycle.rs", "retarget_seam"): (1, "a debug seam replacing a symlink the test created, "
                                              "not a trash item"),
 }

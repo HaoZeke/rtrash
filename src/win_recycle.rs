@@ -4746,11 +4746,15 @@ registry), then the total and the free space on each (a warning under
                      (a filter counts item by item, without the caps)
       --json     emit a JSON object (scripts): one root per volume, with
                      orphans and dangling null, cap_bytes and skips_bin
-      --check    check each $I record instead: list records whose $R
-                     payload is gone, records that cannot be parsed and
-                     payloads with no record; exit 1 when it finds any
-      --fix      with --check, remove the records whose payload is gone
-                     or that cannot be parsed (a payload stays)
+      --check    check each $I record instead: a record whose $R
+                     payload is gone, one that cannot be read
+                     (unreadable: ... (kept)), one that is too big or
+                     cannot be parsed, and a payload with no record;
+                     exit 1 when it finds any
+      --fix      with --check, remove a dangling record and a record
+                     that was read and is too big or cannot be parsed.
+                     An unreadable $I is reported and kept. A payload a
+                     bad record named stays
   -n, --dry-run  with --fix, print what it would remove
       --help     display this help and exit
       --version  output version information and exit
@@ -7072,19 +7076,63 @@ mod tests {
         );
     }
 
-    /// A record that cannot be read is named and kept. `--fix` removes
-    /// only a dangling record or one that was read and cannot be parsed.
+    /// A record that cannot be read is named and kept. The open has to
+    /// fail: building `BinProblem::Unread` by hand would still pass if
+    /// `read_bin_index` mapped that error to `Bad`, which `--fix` removes.
     #[test]
     fn an_unreadable_record_is_kept() {
-        let problem = BinProblem::Unread {
-            record: PathBuf::from("$IUNREAD"),
-            why: "cannot be read (os error 5)".into(),
+        let dir = std::env::temp_dir().join(format!("rtrash-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("$IUNREAD.txt");
+        std::fs::write(&record, b"not a record").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // SAFETY: geteuid has no preconditions. Root can still read a
+            // mode 000 file, and dropping euid would hit other tests.
+            if unsafe { libc::geteuid() } == 0 {
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        #[cfg(windows)]
+        let _hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&record)
+                .unwrap()
         };
-        assert!(problem.fix_target().is_none());
+        let got = read_bin_index(&record);
+        let IndexRead::Unread(why) = &got else {
+            panic!("an unreadable $I mapped to {got:?}");
+        };
+        assert!(why.contains("cannot be read"), "{why}");
+        let problems = check_bin_dir(&dir);
+        let Some(problem) = problems
+            .iter()
+            .find(|p| matches!(p, BinProblem::Unread { .. }))
+        else {
+            panic!("check did not keep an unread record: {problems:?}");
+        };
+        assert!(problem.fix_target().is_none(), "{problem:?}");
         let line = problem.line();
         assert!(line.starts_with("unreadable:"), "{line}");
         assert!(line.contains("kept"), "{line}");
-        assert!(line.contains("cannot be read"), "{line}");
+        assert!(problems
+            .iter()
+            .all(|p| !matches!(p, BinProblem::BadRecord { .. })));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644));
+        }
+        #[cfg(windows)]
+        drop(_hold);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `read_bin_index` takes what the check takes: a record file that
