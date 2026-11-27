@@ -27,12 +27,15 @@ on stderr to remove them with `rtrash empty --dangling`.
       --smaller-than=SIZE only count items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
       --json            emit a JSON object (scripts)
-      --check           check each record instead: list records whose
-                     payload is gone or that cannot serve a restore, bad
-                     dates, payloads with no record and stray names in
-                     info/; exit 1 when it finds any
-      --fix             with --check, remove the records whose payload is
-                     gone or that cannot serve a restore (a payload stays)
+      --check           check each record instead: dangling (payload
+                     gone), bad records, bad dates, payloads with no
+                     record, stray names and put leftovers. A payload
+                     that cannot be reached is not dangling, and its
+                     record is kept. Exit 1 when it finds any
+      --fix             with --check, remove dangling records, bad
+                     records and put leftovers. A record whose payload
+                     cannot be reached stays, and a payload a bad
+                     record named stays
   -n, --dry-run         with --fix, print what it would remove
       --help            display this help and exit
       --version         output version information and exit

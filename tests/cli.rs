@@ -11799,6 +11799,58 @@ fn status_fix_keeps_a_record_whose_files_dir_cannot_be_searched() {
     assert!(payload.exists(), "{text}");
 }
 
+/// An unsearchable `files/` is not a `--check` problem. The check exits
+/// 0, restore cannot read the payload, and `--fix` is not described as
+/// removing every record that cannot be restored.
+#[test]
+fn an_unreachable_payload_is_not_a_check_problem() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        common::skip("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("check-unreached");
+    let keep = sb.work().join("keep.txt");
+    fs::write(&keep, "k").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let files = sb.trash().join("files");
+    struct Open(PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    fs::set_permissions(&files, fs::Permissions::from_mode(0o600)).unwrap();
+    let _open = Open(files);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let check = sb.run(&["status", &pin, "--check"]);
+    let text = format!("{}{}", stdout_of(&check), stderr_of(&check));
+    assert_eq!(check.status.code(), Some(0), "{text}");
+    assert!(stderr_of(&check).contains("0 problems found"), "{text}");
+    assert!(!stdout_of(&check).contains("dangling:"), "{text}");
+    let restored = sb.run(&["restore", &pin, "keep.txt"]);
+    let why = format!("{}{}", stdout_of(&restored), stderr_of(&restored));
+    assert!(!restored.status.success(), "{why}");
+    assert!(why.contains("cannot read the trash payload"), "{why}");
+    let help = stdout_of(&sb.run(&["status", "--help"]));
+    assert!(help.contains("cannot be reached is not dangling"), "{help}");
+    assert!(help.contains("record is kept"), "{help}");
+    assert!(help.contains("put leftovers"), "{help}");
+    let blurb = "with --check, remove dangling and bad records and put leftovers";
+    for rel in [
+        "completions/_rtrash",
+        "completions/rtrash.fish",
+        "completions/rtrash.nu",
+    ] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains(blurb), "{rel}");
+        assert!(!body.contains("broken and dangling"), "{rel}");
+    }
+}
+
 /// An unsearchable `files/` is not a missing payload. `list --json` keeps
 /// `"missing":false`, and status does not count the item as dangling.
 #[test]
