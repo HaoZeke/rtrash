@@ -1886,7 +1886,7 @@ fn same_linked_file(path: &Path, id: (u64, u64), target: Option<&Path>) -> io::R
         }
         Err(e) => return Err(e),
     };
-    if (meta.dev(), meta.ino()) != id {
+    if observed_link_id((meta.dev(), meta.ino()), id) != id {
         return Ok(false);
     }
     let Some(want) = target else {
@@ -1910,6 +1910,20 @@ fn same_linked_file(path: &Path, id: (u64, u64), target: Option<&Path>) -> io::R
         }
         Err(e) => Err(e),
     }
+}
+
+/// Device and inode the source check should see. A test can report the
+/// published id for a file that has a new one: that is ext4 giving a
+/// regular file the inode a symlink just freed. APFS does not, so the
+/// suite can ask without the allocator.
+fn observed_link_id(actual: (u64, u64), published: (u64, u64)) -> (u64, u64) {
+    #[cfg(test)]
+    if MATCH_LINK_ID.with(|c| c.replace(false)) {
+        return published;
+    }
+    #[cfg(not(test))]
+    let _ = published;
+    actual
 }
 
 fn unlink_if_same(path: &Path, id: (u64, u64)) -> io::Result<()> {
@@ -1985,8 +1999,8 @@ fn seam_replace_link_dest(path: &Path) {
     let _ = path;
 }
 
-/// Replace a symlink at `path` with a regular file that reuses its inode,
-/// which is what ext4 does with the inode just freed.
+/// Replace a symlink at `path` with a regular file under a new inode,
+/// after the published name exists and before the source is checked.
 fn seam_reuse_link_src(path: &Path) {
     #[cfg(test)]
     if REUSE_LINK_SRC.with(|c| c.replace(false)) {
@@ -1998,21 +2012,30 @@ fn seam_reuse_link_src(path: &Path) {
 
 #[cfg(test)]
 fn reuse_link_src_as_file(path: &Path) {
-    if !matches!(crate::util::look(path), crate::util::Look::There(_))
-        || unlink_link_name(path).is_err()
-    {
+    if !matches!(crate::util::look(path), crate::util::Look::There(_)) {
         return;
     }
-    // One create. On ext4 that is often the inode just freed. A miss leaves
-    // a different inode; the test tries the whole move again.
+    // Created while the symlink still exists, then renamed over it, so the
+    // inode cannot be the one just freed. ext4 would recycle that inode on
+    // a create after unlink; APFS does not. Two files alive at once cannot
+    // share an inode, and rename keeps the new file's.
+    let staging = next_private(parent_dir(path), "fresh");
     let Ok(mut file) = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(&staging)
     else {
         return;
     };
-    let _ = file.write_all(b"reused-inode");
+    if file.write_all(b"reused-inode").is_err() {
+        drop(file);
+        let _ = unlink_link_name(&staging);
+        return;
+    }
+    drop(file);
+    if fs::rename(&staging, path).is_err() {
+        let _ = unlink_link_name(&staging);
+    }
 }
 
 fn info_mtime_secs(path: &Path) -> io::Result<i64> {
@@ -4726,6 +4749,7 @@ thread_local! {
     static REPLACE_LINK_SRC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REPLACE_LINK_DEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REUSE_LINK_SRC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MATCH_LINK_ID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static VANISH_CLAIMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static OCCUPY_ORIGINAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MUTATE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -7241,6 +7265,7 @@ proc /proc proc rw 0 0
             REPLACE_LINK_SRC.with(|c| c.set(false));
             REPLACE_LINK_DEST.with(|c| c.set(false));
             REUSE_LINK_SRC.with(|c| c.set(false));
+            MATCH_LINK_ID.with(|c| c.set(false));
             VANISH_CLAIMED.with(|c| c.set(false));
             OCCUPY_ORIGINAL.with(|c| c.set(false));
             MUTATE_HELD.with(|c| c.set(false));
@@ -7856,12 +7881,14 @@ proc /proc proc rw 0 0
         }
     }
 
-    /// A symlink replaced by a regular file that reused its inode is not
-    /// the file that was linked. The published name is removed and the
-    /// trash record does not stay. A regular file with another inode is a
-    /// file system that did not reuse it: the test tries a bounded number
-    /// of times and then skips. A missing path, or anything that is not a
-    /// regular file, means the setup never created that file, and fails.
+    /// A symlink replaced by a regular file is not the file that was
+    /// linked, whether or not that file was given the symlink's inode.
+    /// The published name is removed and the trash record does not stay.
+    /// The replacement is created beside the symlink and renamed over it,
+    /// so the inode is new on every file system. A forced refusal still
+    /// skips after the same bounded number of tries. A missing path, or
+    /// anything that is not a regular file, means the setup never created
+    /// that file, and fails.
     #[test]
     fn a_reused_symlink_inode_does_not_leave_an_unrecorded_payload() {
         reuse_tries("reuse-ino");
@@ -8103,11 +8130,10 @@ proc /proc proc rw 0 0
     }
 
     fn reuse_tries(tag: &str) {
-        use std::os::unix::fs::MetadataExt;
         let _seams = ClearSeams;
         let (root, td) = put_trash(tag);
         let item = root.join("sym");
-        // APFS often does not reuse the inode a symlink just freed.
+        // A forced refusal repeats, then skips. One fresh replacement is enough.
         const REUSE_TRIES: usize = 64;
         let mut proved = false;
         let mut saw_other = false;
@@ -8121,7 +8147,6 @@ proc /proc proc rw 0 0
                 }
             }
             std::os::unix::fs::symlink("elsewhere", &item).unwrap();
-            let ino = fs::symlink_metadata(&item).unwrap().ino();
             FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
             REUSE_LINK_SRC.with(|c| c.set(true));
             let meta = fs::symlink_metadata(&item).unwrap();
@@ -8166,11 +8191,11 @@ proc /proc proc rw 0 0
                     item.display()
                 );
             }
-            // Set only from a test, or from outside the run. A real other
-            // inode is what APFS leaves; the flag pretends this one is.
+            // The seam leaves a new inode. A forced refusal is the skip the
+            // proofs ask for; that fresh inode is the replacement itself.
             let refused = std::env::var_os("RTRASH_TEST_NO_INODE_REUSE").is_some()
                 || FORCE_OTHER_INODE.with(|c| c.get());
-            if refused || now.ino() != ino {
+            if refused {
                 saw_other = true;
                 continue;
             }
@@ -8197,6 +8222,223 @@ proc /proc proc rw 0 0
             ),
         };
         crate::test_skip::skip(&why);
+    }
+
+    /// A symlink replaced by a regular file is unpublished even when that
+    /// file's inode is new. ext4 recycles the freed symlink inode into the
+    /// next create; APFS does not. The move must not need the recycle.
+    #[test]
+    fn a_replaced_symlink_needs_no_recycled_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("fresh-ino");
+        let item = root.join("sym");
+        let mut recycled = false;
+        let mut kept_fresh = false;
+        for _ in 0..64 {
+            let _ = fs::remove_file(&item);
+            for dir in [td.files(), td.info()] {
+                for entry in fs::read_dir(&dir).unwrap().flatten() {
+                    let path = entry.path();
+                    let _ = fs::remove_file(&path);
+                    let _ = fs::remove_dir_all(&path);
+                }
+            }
+            std::os::unix::fs::symlink("elsewhere", &item).unwrap();
+            let ino = fs::symlink_metadata(&item).unwrap().ino();
+            FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+            REUSE_LINK_SRC.with(|c| c.set(true));
+            let meta = fs::symlink_metadata(&item).unwrap();
+            let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+            let Ok(now) = fs::symlink_metadata(&item) else {
+                continue;
+            };
+            if !now.is_file() {
+                continue;
+            }
+            assert_eq!(fs::read(&item).unwrap(), b"reused-inode", "{err}");
+            assert!(as_published(&err).is_none(), "{err}");
+            assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
+            assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
+            if now.ino() == ino {
+                recycled = true;
+                break;
+            }
+            kept_fresh = true;
+            break;
+        }
+        assert!(
+            !recycled,
+            "the replacement took the symlink inode, so the move still depends on recycling"
+        );
+        assert!(
+            kept_fresh,
+            "the replacement file was not left in place under a new inode"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A regular file is not the symlink that was published, even when the
+    /// check is given that symlink's device and inode. That is the recycle
+    /// ext4 does and APFS does not, with no allocator involved.
+    #[test]
+    fn a_regular_file_bearing_the_published_inode_is_not_the_symlink() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("rtrash-plain-ino-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let plain = root.join("plain");
+        fs::write(&plain, b"reused-inode").unwrap();
+        let meta = fs::symlink_metadata(&plain).unwrap();
+        let id = (meta.dev(), meta.ino());
+        let same = same_linked_file(&plain, id, Some(Path::new("elsewhere"))).unwrap();
+        assert!(
+            !same,
+            "a regular file with the published inode is not that symlink"
+        );
+        let link = root.join("sym");
+        std::os::unix::fs::symlink("elsewhere", &link).unwrap();
+        let meta = fs::symlink_metadata(&link).unwrap();
+        let id = (meta.dev(), meta.ino());
+        assert!(same_linked_file(&link, id, Some(Path::new("elsewhere"))).unwrap());
+        assert!(!same_linked_file(&link, id, Some(Path::new("other"))).unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Told that the replacement still has the published inode, the move
+    /// removes the published name and keeps the file. That is the ext4
+    /// recycle, forced so a filesystem that never recycles proves it too.
+    #[test]
+    fn a_matched_inode_on_a_replacement_file_is_not_published() {
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("match-ino");
+        let item = root.join("sym");
+        std::os::unix::fs::symlink("elsewhere", &item).unwrap();
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        REUSE_LINK_SRC.with(|c| c.set(true));
+        MATCH_LINK_ID.with(|c| c.set(true));
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+        assert_eq!(fs::read(&item).unwrap(), b"reused-inode", "{err}");
+        assert!(as_published(&err).is_none(), "{err}");
+        assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
+        assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Turns `readlink` of a regular file under `rtrash-guard-pin` into
+    /// `EIO`. A symlink is read as usual. The `EINVAL` branch in
+    /// `same_linked_file` does not treat `EIO` as a different file, so only
+    /// the `is_symlink` guard still reports the replacement as unpublished.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    const LINK_READ_EIO: &str = concat!(
+        "#define _GNU_SOURCE\n",
+        "#include <errno.h>\n",
+        "#include <fcntl.h>\n",
+        "#include <string.h>\n",
+        "#include <sys/stat.h>\n",
+        "#include <sys/syscall.h>\n",
+        "#include <unistd.h>\n",
+        "static int not_link(int dirfd, const char *path) {\n",
+        "    if (path == 0 || strstr(path, \"rtrash-guard-pin\") == 0)\n",
+        "        return 0;\n",
+        "    struct stat st;\n",
+        "    if (fstatat(dirfd, path, &st, AT_SYMLINK_NOFOLLOW) != 0)\n",
+        "        return 0;\n",
+        "    return !S_ISLNK(st.st_mode);\n",
+        "}\n",
+        "ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t sz) {\n",
+        "    if (not_link(dirfd, path)) {\n",
+        "        errno = EIO;\n",
+        "        return -1;\n",
+        "    }\n",
+        "    return syscall(SYS_readlinkat, dirfd, path, buf, sz);\n",
+        "}\n",
+        "ssize_t readlink(const char *path, char *buf, size_t sz) {\n",
+        "    return readlinkat(AT_FDCWD, path, buf, sz);\n",
+        "}\n",
+    );
+
+    /// A symlink replaced by a regular file stays out of the trash when
+    /// reading that file as a link fails with `EIO`, not `EINVAL`. The
+    /// guard returns before `read_link`, so the move still says the source
+    /// is no longer the linked file and drops the published name.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn a_replacement_whose_link_read_fails_is_still_not_published() {
+        const CHILD: &str = "TRASHDIR_GUARD_PIN_CHILD";
+        const NAME: &str = concat!(
+            "trashdir::tests::",
+            "a_replacement_whose_link_read_fails_is_still_not_published"
+        );
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!("rtrash-link-eio-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let src = dir.join("readlink_eio.c");
+            let so = dir.join("readlink_eio.so");
+            fs::write(&src, LINK_READ_EIO).unwrap();
+            let cc = std::process::Command::new("gcc")
+                .args(["-shared", "-fPIC", "-o"])
+                .arg(&so)
+                .arg(&src)
+                .output()
+                .unwrap();
+            assert!(
+                cc.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cc.stderr)
+            );
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    NAME,
+                    "--nocapture",
+                    "--test-threads=1",
+                    "--color=never",
+                ])
+                .env(CHILD, "1")
+                .env("LD_PRELOAD", &so)
+                .output()
+                .unwrap();
+            let _ = fs::remove_dir_all(&dir);
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            let stderr = String::from_utf8_lossy(&child.stderr);
+            assert!(
+                child.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "stdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            return;
+        }
+
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("guard-pin");
+        let probe = root.join("probe");
+        fs::write(&probe, b"x").unwrap();
+        let probe_err = fs::read_link(&probe).unwrap_err();
+        assert_eq!(
+            probe_err.raw_os_error(),
+            Some(libc::EIO),
+            "the stand-in read_link did not fail with EIO: {probe_err}"
+        );
+        let _ = fs::remove_file(&probe);
+        let item = root.join("sym");
+        std::os::unix::fs::symlink("elsewhere", &item).unwrap();
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        REUSE_LINK_SRC.with(|c| c.set(true));
+        MATCH_LINK_ID.with(|c| c.set(true));
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no longer the file that was linked"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&item).unwrap(), b"reused-inode", "{err}");
+        assert!(as_published(&err).is_none(), "{err}");
+        assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
+        assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A file planted at the published name after `linkat` is not the link
