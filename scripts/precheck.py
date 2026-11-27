@@ -4010,6 +4010,7 @@ def check_config_docs():
 # RTRASH_T_ prefixes and MAN_ENV_SEAMS.
 MAN_ENV_SEAMS = {
     "RTRASH_OSASCRIPT": "a stand-in for osascript in the Finder tests",
+    "RTRASH_SKIP_LOG": "the file CI prints after the suite; a skip appends one line",
     "RTRASH_WSL_CONF": "a stand-in for /etc/wsl.conf in the wsl tests",
     "RTRASH_WSL_OSRELEASE": "a stand-in for the kernel release in the wsl tests",
 }

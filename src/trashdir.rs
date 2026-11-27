@@ -7446,20 +7446,131 @@ proc /proc proc rw 0 0
         let _ = fs::remove_dir_all(&root);
     }
 
+    thread_local! {
+        /// Remove the replacement before it is classified, so the try is a
+        /// missing path rather than a file system that kept another inode.
+        static FORCE_MISSING_REPLACEMENT: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+        /// Count a regular file as another inode, so a file system that
+        /// does reuse one still takes the skip.
+        static FORCE_OTHER_INODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    struct Flag {
+        cell: &'static std::thread::LocalKey<std::cell::Cell<bool>>,
+    }
+
+    impl Flag {
+        fn raise(cell: &'static std::thread::LocalKey<std::cell::Cell<bool>>) -> Self {
+            cell.with(|c| c.set(true));
+            Self { cell }
+        }
+    }
+
+    impl Drop for Flag {
+        fn drop(&mut self) {
+            self.cell.with(|c| c.set(false));
+        }
+    }
+
+    /// Hold `RTRASH_SKIP_LOG` at `log` for `body`. The two proofs below
+    /// share the variable, so they take it one at a time.
+    fn with_skip_log<T>(log: &Path, body: impl FnOnce() -> T) -> T {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("RTRASH_SKIP_LOG");
+        std::env::set_var("RTRASH_SKIP_LOG", log);
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("RTRASH_SKIP_LOG", v),
+                    None => std::env::remove_var("RTRASH_SKIP_LOG"),
+                }
+            }
+        }
+        let _restore = Restore(old);
+        body()
+    }
+
+    fn panic_text(err: Box<dyn std::any::Any + Send>) -> String {
+        match err.downcast_ref::<String>() {
+            Some(s) => s.clone(),
+            None => match err.downcast_ref::<&str>() {
+                Some(s) => (*s).to_string(),
+                None => String::new(),
+            },
+        }
+    }
+
     /// A symlink replaced by a regular file that reused its inode is not
     /// the file that was linked. The published name is removed and the
-    /// trash record does not stay. When the file system never reuses that
-    /// inode, the test skips; the checks run only after a reuse is seen.
+    /// trash record does not stay. A regular file with another inode is a
+    /// file system that did not reuse it: the test tries a bounded number
+    /// of times and then skips. A missing path, or anything that is not a
+    /// regular file, means the setup never created that file, and fails.
     #[test]
     fn a_reused_symlink_inode_does_not_leave_an_unrecorded_payload() {
+        reuse_tries("reuse-ino");
+    }
+
+    /// Removing the replacement is not a file system that refused the
+    /// inode. The run fails, and it does not write a skip note.
+    #[test]
+    fn a_missing_replacement_fails_instead_of_skipping() {
+        let log = std::env::temp_dir().join(format!("rtrash-skiplog-miss-{}", std::process::id()));
+        let _ = fs::remove_file(&log);
+        let _flag = Flag::raise(&FORCE_MISSING_REPLACEMENT);
+        let caught = with_skip_log(&log, || {
+            std::panic::catch_unwind(|| reuse_tries("reuse-miss"))
+        });
+        let msg = panic_text(caught.expect_err("a missing replacement skipped or passed"));
+        assert!(
+            msg.contains("replacement") && msg.contains("is missing"),
+            "{msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("skipping"),
+            "a missing replacement was skipped: {msg}"
+        );
+        let written = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !written.contains("a_missing_replacement_fails_instead_of_skipping"),
+            "a missing replacement was recorded as a skip: {written}"
+        );
+        let _ = fs::remove_file(&log);
+    }
+
+    /// A forced other inode takes the skip, including the line CI reads
+    /// from `RTRASH_SKIP_LOG` when stderr is captured.
+    #[test]
+    fn a_forced_non_reuse_skips_and_writes_the_skip_log() {
+        let log = std::env::temp_dir().join(format!("rtrash-skiplog-other-{}", std::process::id()));
+        let _ = fs::remove_file(&log);
+        let _flag = Flag::raise(&FORCE_OTHER_INODE);
+        with_skip_log(&log, || reuse_tries("reuse-other"));
+        let written = fs::read_to_string(&log).expect("skip log");
+        assert!(
+            written.contains("the platform did not reuse the symlink inode"),
+            "{written}"
+        );
+        assert!(written.contains("skipping"), "{written}");
+        assert!(
+            written.contains("a_forced_non_reuse_skips_and_writes_the_skip_log"),
+            "{written}"
+        );
+        let _ = fs::remove_file(&log);
+    }
+
+    fn reuse_tries(tag: &str) {
         use std::os::unix::fs::MetadataExt;
         let _seams = ClearSeams;
-        let (root, td) = put_trash("reuse-ino");
+        let (root, td) = put_trash(tag);
         let item = root.join("sym");
-        // APFS often does not reuse the inode a symlink just freed. Try
-        // a bounded number of times, then skip the run.
+        // APFS often does not reuse the inode a symlink just freed.
         const REUSE_TRIES: usize = 64;
         let mut proved = false;
+        let mut saw_other = false;
         for _ in 0..REUSE_TRIES {
             let _ = fs::remove_file(&item);
             for dir in [td.files(), td.info()] {
@@ -7475,10 +7586,41 @@ proc /proc proc rw 0 0
             REUSE_LINK_SRC.with(|c| c.set(true));
             let meta = fs::symlink_metadata(&item).unwrap();
             let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
-            let Ok(now) = fs::symlink_metadata(&item) else {
-                continue;
+            if FORCE_MISSING_REPLACEMENT.with(|c| c.get()) {
+                let _ = fs::remove_file(&item);
+            }
+            let now = match fs::symlink_metadata(&item) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&root);
+                    if crate::util::is_missing(&e) {
+                        panic!(
+                            "the replacement '{}' is missing, so this is not a file system \
+                             that refused to reuse the symlink inode ({e})",
+                            item.display()
+                        );
+                    }
+                    panic!(
+                        "the replacement '{}' could not be read, so this is not a file system \
+                         that refused to reuse the symlink inode ({e})",
+                        item.display()
+                    );
+                }
             };
-            if !reused_symlink_inode(ino, &now) {
+            if !now.is_file() {
+                let _ = fs::remove_dir_all(&root);
+                panic!(
+                    "the replacement '{}' is not a regular file, so this is not a file system \
+                     that refused to reuse the symlink inode",
+                    item.display()
+                );
+            }
+            // Set only from a test, or from outside the run. A real other
+            // inode is what APFS leaves; the flag pretends this one is.
+            let refused = std::env::var_os("RTRASH_TEST_NO_INODE_REUSE").is_some()
+                || FORCE_OTHER_INODE.with(|c| c.get());
+            if refused || now.ino() != ino {
+                saw_other = true;
                 continue;
             }
             assert_eq!(fs::read(&item).unwrap(), b"reused-inode", "{err}");
@@ -7488,24 +7630,17 @@ proc /proc proc rw 0 0
             proved = true;
             break;
         }
-        if !proved {
-            let _ = fs::remove_dir_all(&root);
-            eprintln!(
-                "the platform did not reuse the symlink inode in {REUSE_TRIES} tries; skipping"
-            );
+        let _ = fs::remove_dir_all(&root);
+        if proved {
             return;
         }
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    /// The inode `ino` came back as a regular file. `RTRASH_TEST_NO_INODE_REUSE`,
-    /// set only while proving the skip, reports that this did not happen.
-    fn reused_symlink_inode(ino: u64, now: &fs::Metadata) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        if std::env::var_os("RTRASH_TEST_NO_INODE_REUSE").is_some() {
-            return false;
-        }
-        now.ino() == ino && now.is_file()
+        assert!(
+            saw_other,
+            "the symlink inode test ended with no regular file of another inode"
+        );
+        crate::test_skip::skip(&format!(
+            "the platform did not reuse the symlink inode in {REUSE_TRIES} tries; skipping"
+        ));
     }
 
     /// A file planted at the published name after `linkat` is not the link
