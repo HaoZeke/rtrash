@@ -330,7 +330,7 @@ Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list`
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
 Orphans (payloads in `files/` with no `.trashinfo`) come last, with a `????-??-??` date and their path inside the trash.
 In JSON they carry `"orphan": true`; an age filter leaves them out.
-List reuses a sealed catalog of the records under `$XDG_CACHE_HOME/rtrash` (key `$XDG_DATA_HOME/rtrash/cache.key`, mode 0600) when those records still match it. Put, restore, rm and empty remove that catalog. A change another tool makes does not: the catalog is ignored and the next list reads the records. Empty, a size budget and the check before an unscoped empty read each record again before they delete. `RTRASH_NO_CACHE=1` reads every record.
+List reuses a sealed catalog of the records under `$XDG_CACHE_HOME/rtrash` (key `$XDG_DATA_HOME/rtrash/cache.key`, mode 0600) when those records still match it. Put, restore, rm and empty remove that catalog. A change another tool makes does not: the catalog is ignored and the next list reads the records. Empty, a size budget and the check before an unscoped empty read each record again before they delete. `RTRASH_NO_CACHE` set to `1`, `true` or `yes`, in any case, reads every record. Any other value leaves the catalog on.
 
 | Flag | Meaning |
 |------|---------|

@@ -784,8 +784,14 @@ A change another tool makes does not: the catalog is ignored and the
 records are read.
 Empty, a size budget and the check before an unscoped empty read each
 record again before they delete.
-.B RTRASH_NO_CACHE=1
-reads every record.
+.B RTRASH_NO_CACHE
+set to
+.B 1
+(or
+.B true
+or
+.BR yes ,
+any case) reads every record. Any other value leaves the catalog on.
 .TP
 .B \-\-home\-only
 Only the home trash

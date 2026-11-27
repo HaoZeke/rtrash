@@ -12,7 +12,9 @@ a glob character (* ? [), like --glob.
 Payloads with no .trashinfo come last, dated ????-??-??, under their path
 in the trash (\"orphan\":true in JSON); an age filter leaves them out.
 An unchanged trash is listed from a sealed catalog of its records.
-A change by another tool is read again. RTRASH_NO_CACHE=1 reads every record.
+A change by another tool is read again. RTRASH_NO_CACHE set to 1, true
+or yes, in any case, reads every record. Any other value leaves the
+catalog on.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  list only this trash directory (repeatable);
