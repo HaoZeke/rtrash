@@ -8353,43 +8353,54 @@ impl Drop for Holder {
     }
 }
 
-/// True when this process is root and still cannot read some `/proc`
-/// process folders. A user namespace maps the caller to root and leaves
-/// other processes unreadable. On macOS the answer is no.
+/// How many live processes `who` could not inspect, when this process
+/// is root and that count is not zero. `None` otherwise.
+///
+/// The count is the `unreadable` field of `who --json`. `who` fills it
+/// in `holders::scan_in`, which ignores an exited process (state `Z`,
+/// `X` or `x`). The kernel refuses that process's fd directory even
+/// for root, so the first `PermissionDenied` there is not a reason to
+/// skip: a transient zombie would skip a run that can still see every
+/// live process. A user namespace maps the caller to root and leaves
+/// other live processes unreadable. On macOS the answer is none.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn proc_unreadable_as_root() -> bool {
+fn live_unreadable_as_root() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
-            return false;
+            return None;
         }
-        let Ok(dir) = fs::read_dir("/proc") else {
-            return true;
-        };
-        for entry in dir.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if !name.bytes().all(|b| b.is_ascii_digit()) {
-                continue;
-            }
-            if let Err(e) = fs::read_dir(entry.path().join("fd")) {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    return true;
-                }
-            }
+        // Nothing holds this path, so the object is only the count and
+        // no holder's text can repeat the field name.
+        let probe = std::env::temp_dir().join("rtrash-who-unread-probe");
+        let out = common::rtrash_real(common::Real::NoTrash)
+            .args(["who", "--json"])
+            .arg(&probe)
+            .output()
+            .unwrap_or_else(|e| panic!("who --json: {e}"));
+        let text = String::from_utf8_lossy(&out.stdout);
+        if !text.contains("\"unreadable\":") {
+            panic!(
+                "who --json exit {:?} gave no unreadable count\nstdout: {text}\nstderr: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let n = who_unreadable(&text);
+        if n > 0 {
+            return Some(n);
         }
     }
-    false
+    None
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn who_names_the_process_holding_a_file_or_its_directory() {
-    if proc_unreadable_as_root() {
-        common::skip("some /proc entries are not readable; skipping");
+    if let Some(n) = live_unreadable_as_root() {
+        let noun = if n == 1 { "process" } else { "processes" };
+        common::skip(&format!("{n} live {noun} could not be inspected; skipping"));
         return;
     }
     let sb = Sandbox::new("who");
