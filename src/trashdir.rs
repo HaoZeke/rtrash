@@ -7964,6 +7964,121 @@ proc /proc proc rw 0 0
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Turns `readlink` of a regular file under `rtrash-guard-pin` into
+    /// `EIO`. A symlink is read as usual. The `EINVAL` branch in
+    /// `same_linked_file` does not treat `EIO` as a different file, so only
+    /// the `is_symlink` guard still reports the replacement as unpublished.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    const LINK_READ_EIO: &str = concat!(
+        "#define _GNU_SOURCE\n",
+        "#include <errno.h>\n",
+        "#include <fcntl.h>\n",
+        "#include <string.h>\n",
+        "#include <sys/stat.h>\n",
+        "#include <sys/syscall.h>\n",
+        "#include <unistd.h>\n",
+        "static int not_link(int dirfd, const char *path) {\n",
+        "    if (path == 0 || strstr(path, \"rtrash-guard-pin\") == 0)\n",
+        "        return 0;\n",
+        "    struct stat st;\n",
+        "    if (fstatat(dirfd, path, &st, AT_SYMLINK_NOFOLLOW) != 0)\n",
+        "        return 0;\n",
+        "    return !S_ISLNK(st.st_mode);\n",
+        "}\n",
+        "ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t sz) {\n",
+        "    if (not_link(dirfd, path)) {\n",
+        "        errno = EIO;\n",
+        "        return -1;\n",
+        "    }\n",
+        "    return syscall(SYS_readlinkat, dirfd, path, buf, sz);\n",
+        "}\n",
+        "ssize_t readlink(const char *path, char *buf, size_t sz) {\n",
+        "    return readlinkat(AT_FDCWD, path, buf, sz);\n",
+        "}\n",
+    );
+
+    /// A symlink replaced by a regular file stays out of the trash when
+    /// reading that file as a link fails with `EIO`, not `EINVAL`. The
+    /// guard returns before `read_link`, so the move still says the source
+    /// is no longer the linked file and drops the published name.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn a_replacement_whose_link_read_fails_is_still_not_published() {
+        const CHILD: &str = "TRASHDIR_GUARD_PIN_CHILD";
+        const NAME: &str = concat!(
+            "trashdir::tests::",
+            "a_replacement_whose_link_read_fails_is_still_not_published"
+        );
+        if std::env::var_os(CHILD).is_none() {
+            let dir = std::env::temp_dir().join(format!("rtrash-link-eio-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let src = dir.join("readlink_eio.c");
+            let so = dir.join("readlink_eio.so");
+            fs::write(&src, LINK_READ_EIO).unwrap();
+            let cc = std::process::Command::new("gcc")
+                .args(["-shared", "-fPIC", "-o"])
+                .arg(&so)
+                .arg(&src)
+                .output()
+                .unwrap();
+            assert!(
+                cc.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cc.stderr)
+            );
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    NAME,
+                    "--nocapture",
+                    "--test-threads=1",
+                    "--color=never",
+                ])
+                .env(CHILD, "1")
+                .env("LD_PRELOAD", &so)
+                .output()
+                .unwrap();
+            let _ = fs::remove_dir_all(&dir);
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            let stderr = String::from_utf8_lossy(&child.stderr);
+            assert!(
+                child.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "stdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            return;
+        }
+
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("guard-pin");
+        let probe = root.join("probe");
+        fs::write(&probe, b"x").unwrap();
+        let probe_err = fs::read_link(&probe).unwrap_err();
+        assert_eq!(
+            probe_err.raw_os_error(),
+            Some(libc::EIO),
+            "the stand-in read_link did not fail with EIO: {probe_err}"
+        );
+        let _ = fs::remove_file(&probe);
+        let item = root.join("sym");
+        std::os::unix::fs::symlink("elsewhere", &item).unwrap();
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        REUSE_LINK_SRC.with(|c| c.set(true));
+        MATCH_LINK_ID.with(|c| c.set(true));
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no longer the file that was linked"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&item).unwrap(), b"reused-inode", "{err}");
+        assert!(as_published(&err).is_none(), "{err}");
+        assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
+        assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A file planted at the published name after `linkat` is not the link
     /// this move created, so a failed source unlink does not delete it.
     #[test]
