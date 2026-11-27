@@ -10,7 +10,14 @@ fn root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let p = root().join(rel);
-    fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    let raw = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    normalize_newlines(&raw)
+}
+
+// Git for Windows checks files out with CRLF. `read` and the Performance
+// scan both turn CRLF into LF, so a hand-built CRLF string scans like the file.
+fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 fn assert_contains(hay: &str, needles: &[&str], label: &str) {
@@ -209,7 +216,7 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
     let org = read("docs/orgmode/benchmarks.org");
     for token in RETIRED_ROW_TOKENS {
         assert!(
-            !has_token(performance, token),
+            !has_token(&performance, token),
             "retired row `{token}` is back in the Performance section"
         );
         assert!(
@@ -319,8 +326,8 @@ fn readme_performance_points_at_the_sourced_benchmarks() {
         ("docs/orgmode/benchmarks.org", &org),
     ] {
         assert!(
-            text.contains("n_small=400"),
-            "{label} must contain n_small=400"
+            has_token(text, "n_small=400"),
+            "{label} must contain the token n_small=400"
         );
         assert!(
             text.contains("ASV params 50/200"),
@@ -407,16 +414,16 @@ fn retired_row_tokens_ignore_longer_cells_and_inner_headings() {
     ]
     .join("\n");
     let body = performance_section(&sample);
-    assert!(has_token(body, "100 000 entries"));
-    assert!(has_token(body, "52x"));
-    assert!(has_token(body, "52×"));
+    assert!(has_token(&body, "100 000 entries"));
+    assert!(has_token(&body, "52x"));
+    assert!(has_token(&body, "52×"));
     assert!(body.contains("### Nested"));
     assert!(body.contains("## Notes"));
     assert!(
         body.contains("# comment"),
         "a fenced level-1 comment must stay inside the scan, got {body}"
     );
-    assert!(!has_token(body, "20 000 entries"));
+    assert!(!has_token(&body, "20 000 entries"));
     let fenced_date = "\
 Later sections of this page name 2026-10-10.
 
@@ -448,10 +455,71 @@ from 2026-10-10, 2026-10-13, and 2026-10-14.
         dates_missing_from_headings(r2_org).expect("anchor"),
         vec!["2026-10-10"]
     );
+    let org_src = "\
+Later sections of this page name 2026-10-10.
+
+#+begin_src shell
+# 2026-10-10 inside the source block
+#+end_src
+
+* measured (2026-10-13)
+";
+    assert_eq!(
+        dates_missing_from_headings(org_src).expect("anchor"),
+        vec!["2026-10-10"]
+    );
+    let org_after = "\
+Later sections of this page name 2026-10-10.
+
+#+BEGIN_SRC shell
+# comment
+#+END_SRC
+
+* run (2026-10-10)
+";
+    assert!(
+        dates_missing_from_headings(org_after)
+            .expect("anchor")
+            .is_empty(),
+        "a heading after #+end_src still counts"
+    );
+    assert!(
+        !has_token("n_small=4000", "n_small=400"),
+        "n_small=400 must not match inside n_small=4000"
+    );
+    assert!(has_token("(n_small=400; ASV params 50/200)", "n_small=400"));
+    assert!(has_token(
+        "(=n_small=400=; ASV params 50/200)",
+        "n_small=400"
+    ));
+}
+
+#[test]
+fn a_crlf_readme_scans_like_lf() {
+    let lf = read("README.md");
+    let crlf = lf.replace('\n', "\r\n");
+    let from_lf = performance_section(&lf);
+    let from_crlf = performance_section(&crlf);
+    assert_eq!(from_crlf, from_lf);
+    assert!(
+        from_lf.contains("](docs/benchmarks.md)"),
+        "the CRLF scan must keep the benchmark link, got {from_lf}"
+    );
+    assert!(from_lf.contains("how full empty deletes"));
+    assert!(!from_lf.contains("further optimized"));
+    for token in RETIRED_ROW_TOKENS {
+        assert_eq!(
+            has_token(&from_lf, token),
+            has_token(&from_crlf, token),
+            "{token}"
+        );
+        assert!(!has_token(&from_lf, token), "{token}");
+    }
 }
 
 // See `retired_row_tokens_ignore_longer_cells_and_inner_headings` for the bound.
-fn performance_section(readme: &str) -> &str {
+fn performance_section(readme: &str) -> String {
+    let readme = normalize_newlines(readme);
     let marker = "## Performance\n";
     let start = readme
         .find(marker)
@@ -466,8 +534,7 @@ fn performance_section(readme: &str) -> &str {
             .map(|n| offset + n + 1)
             .unwrap_or(rest.len());
         let line = rest[offset..next].trim_end_matches(['\n', '\r']);
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        if is_fence_line(line) {
             in_fence = !in_fence;
             offset = next;
             continue;
@@ -478,7 +545,21 @@ fn performance_section(readme: &str) -> &str {
         }
         offset = next;
     }
-    &rest[..end]
+    rest[..end].to_string()
+}
+
+fn is_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return true;
+    }
+    let bytes = trimmed.as_bytes();
+    starts_with_ignore_ascii_case(bytes, b"#+begin_")
+        || starts_with_ignore_ascii_case(bytes, b"#+end_")
+}
+
+fn starts_with_ignore_ascii_case(text: &[u8], prefix: &[u8]) -> bool {
+    text.len() >= prefix.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 fn has_token(hay: &str, needle: &str) -> bool {
@@ -581,8 +662,7 @@ fn unfenced_lines(text: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut in_fence = false;
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        if is_fence_line(line) {
             in_fence = !in_fence;
             continue;
         }
