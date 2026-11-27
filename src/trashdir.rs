@@ -5783,35 +5783,115 @@ mod tests {
         out
     }
 
+    /// `mount:[inode]` of this process, or empty when it cannot be read.
+    #[cfg(target_os = "linux")]
+    fn mount_namespace_id() -> String {
+        fs::read_link("/proc/self/ns/mnt")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Marker on the bind child's argv. An environment variable would have
+    /// to be listed in the man page; the word is only a test filter.
+    #[cfg(target_os = "linux")]
+    const BIND_CHILD: &str = "rtrash_bind_child";
+
+    /// `rtrash_bind_ns=` plus the caller's mount namespace id.
+    #[cfg(target_os = "linux")]
+    const BIND_NS_PREFIX: &str = "rtrash_bind_ns=";
+
+    /// The caller's mount namespace id when this process is the bind child.
+    #[cfg(target_os = "linux")]
+    fn bind_child_caller_ns() -> Option<String> {
+        let mut child = false;
+        let mut ns = String::new();
+        for arg in std::env::args().skip(1) {
+            if arg == BIND_CHILD {
+                child = true;
+            } else if let Some(id) = arg.strip_prefix(BIND_NS_PREFIX) {
+                ns = id.to_string();
+            }
+        }
+        child.then_some(ns)
+    }
+
     /// Two pins of one directory, reached by different paths, are one
     /// trash. A bind mount keeps the paths distinct after `resolve_parent`
     /// and still shares the device and inode `resolve_dirs` dedups on.
     /// Linux only: `unshare` and `mount --bind` are not on macOS, where
     /// this module still builds.
+    ///
+    /// The bind runs only in a private mount namespace. The parent always
+    /// re-executes under `unshare -rm` and passes `BIND_CHILD` plus its
+    /// mount namespace id on the child's argv. The child bind-mounts only
+    /// when that id differs and `/` is private. When the namespace cannot
+    /// be made, the test skips. The parent requires the child's stdout to
+    /// show this test's name with `ok`: a filter that matches nothing
+    /// also exits 0.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_bind_mounted_trash_is_pinned_once() {
-        // `unshare -r` maps the caller to root in the child. A process
-        // that is already root mounts directly and must not unshare again.
-        if unsafe { libc::geteuid() } != 0 {
-            let exe = std::env::current_exe().expect("test binary");
-            let name = "trashdir::tests::a_bind_mounted_trash_is_pinned_once";
-            let out = std::process::Command::new("unshare")
-                .args(["-rm", "--"])
-                .arg(&exe)
-                .arg(name)
-                .args(["--exact", "--nocapture", "--test-threads=1"])
-                .output()
-                .expect("unshare");
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        if let Some(caller_ns) = bind_child_caller_ns() {
+            let mine = mount_namespace_id();
             assert!(
-                out.status.success(),
-                "unshare bind child failed\n{stdout}{stderr}"
+                !caller_ns.is_empty() && mine != caller_ns,
+                "refusing to bind-mount in the caller's mount namespace \
+                 (this {mine}, caller {caller_ns})"
+            );
+            let private = std::process::Command::new("mount")
+                .args(["--make-rprivate", "/"])
+                .status()
+                .expect("mount --make-rprivate");
+            assert!(
+                private.success(),
+                "a private mount namespace could not be made; refusing to bind"
+            );
+            bind_mounted_pins_collapse();
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary");
+        let name = "trashdir::tests::a_bind_mounted_trash_is_pinned_once";
+        let spawned = std::process::Command::new("unshare")
+            .args(["-rm", "--"])
+            .arg(&exe)
+            .arg(name)
+            .arg(BIND_CHILD)
+            .arg(format!("{BIND_NS_PREFIX}{}", mount_namespace_id()))
+            .args(["--exact", "--nocapture", "--test-threads=1"])
+            .output();
+        let out = match spawned {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!(
+                    "a_bind_mounted_trash_is_pinned_once: a private mount namespace could not be \
+                     made ({e}); skipping the bind check"
+                );
+                return;
+            }
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let ok_line = format!("test {name} ... ok");
+        if out.status.success() && stdout.contains(&ok_line) {
+            return;
+        }
+        // The harness never started, so `unshare` could not make the namespace.
+        // A filter that matches nothing still prints `running 0 tests` and
+        // exits 0; that is a failure, not a skip.
+        if !stdout.contains("running ") {
+            let why = stderr.trim().replace('\n', " ");
+            let why = if why.is_empty() {
+                format!("status {}", out.status)
+            } else {
+                why
+            };
+            eprintln!(
+                "a_bind_mounted_trash_is_pinned_once: a private mount namespace could not be \
+                 made ({why}); skipping the bind check"
             );
             return;
         }
-        bind_mounted_pins_collapse();
+        panic!("bind child did not run {name} to ok\n{stdout}{stderr}");
     }
 
     #[cfg(target_os = "linux")]
@@ -5820,6 +5900,22 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let real = root.join("real");
         let bind = root.join("bind");
+        struct Unmount {
+            bind: PathBuf,
+            root: PathBuf,
+        }
+        impl Drop for Unmount {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("umount")
+                    .arg(&self.bind)
+                    .status();
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+        let _guard = Unmount {
+            bind: bind.clone(),
+            root: root.clone(),
+        };
         fs::create_dir_all(real.join("Trash/files")).unwrap();
         fs::create_dir_all(real.join("Trash/info")).unwrap();
         fs::create_dir_all(&bind).unwrap();
@@ -5830,14 +5926,6 @@ mod tests {
             .status()
             .expect("mount");
         assert!(mounted.success(), "mount --bind");
-        struct Unmount(PathBuf, PathBuf);
-        impl Drop for Unmount {
-            fn drop(&mut self) {
-                let _ = std::process::Command::new("umount").arg(&self.0).status();
-                let _ = fs::remove_dir_all(&self.1);
-            }
-        }
-        let _guard = Unmount(bind.clone(), root.clone());
         let a = fs::canonicalize(real.join("Trash")).unwrap();
         let b = fs::canonicalize(bind.join("Trash")).unwrap();
         assert_ne!(a, b);
@@ -6000,20 +6088,16 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let d = root.join("d");
         fs::create_dir_all(&d).unwrap();
+        let _restore = crate::file_replace::RestoreWritable::new(&d, &root);
         fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
-        // False when the write succeeded: this process is not stopped by mode 0555.
-        if !crate::file_replace::writes_are_denied(&d) {
-            eprintln!(
-                "an_empty_unwritable_directory_cannot_be_removed: mode 0555 does not deny writes \
-                 (euid {}); skipping the DAC check",
-                unsafe { libc::geteuid() }
-            );
-        } else {
-            let err = tree_removable(&d, &fs::symlink_metadata(&d).unwrap()).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        if crate::file_replace::skip_when_0555_write_succeeds(
+            "an_empty_unwritable_directory_cannot_be_removed",
+            &d,
+        ) {
+            return;
         }
-        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
-        let _ = fs::remove_dir_all(&root);
+        let err = tree_removable(&d, &fs::symlink_metadata(&d).unwrap()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 
     /// A put writes its record under a temporary name and links it into

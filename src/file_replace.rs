@@ -122,7 +122,7 @@ pub(crate) fn temp_beside(path: &Path) -> PathBuf {
 }
 
 #[cfg(all(test, unix))]
-pub(crate) use tests::writes_are_denied;
+pub(crate) use tests::{skip_when_0555_write_succeeds, RestoreWritable};
 
 #[cfg(test)]
 mod tests {
@@ -150,11 +150,60 @@ mod tests {
     /// `CAP_DAC_OVERRIDE`. A test of the denial skips when this is false:
     /// the write succeeded, so there is no `PermissionDenied` to see.
     #[cfg(unix)]
-    pub(crate) fn writes_are_denied(dir: &Path) -> bool {
+    fn writes_are_denied(dir: &Path) -> bool {
         let probe = dir.join(".dac-probe");
         let denied = fs::write(&probe, b"x").is_err();
         let _ = fs::remove_file(&probe);
         denied
+    }
+
+    /// True when the caller should skip. A write into this mode `0555`
+    /// directory succeeded, so the mode does not stop this process and
+    /// there is no permission error to assert. The note is printed here
+    /// so each denial test says it the same way.
+    #[cfg(unix)]
+    pub(crate) fn skip_when_0555_write_succeeds(test: &str, dir: &Path) -> bool {
+        if writes_are_denied(dir) {
+            return false;
+        }
+        eprintln!(
+            "{test}: mode 0555 does not deny writes (euid {}); skipping the DAC check",
+            unsafe { libc::geteuid() }
+        );
+        true
+    }
+
+    /// Puts `dir` back to mode `0755`, then removes `scratch`, when dropped.
+    /// An assert that fails still runs this, so a mode `0555` directory
+    /// cannot stay behind and block the next run.
+    #[cfg(unix)]
+    #[must_use]
+    pub(crate) struct RestoreWritable {
+        dir: PathBuf,
+        scratch: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl RestoreWritable {
+        pub(crate) fn new(dir: impl Into<PathBuf>, scratch: impl Into<PathBuf>) -> Self {
+            Self {
+                dir: dir.into(),
+                scratch: scratch.into(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RestoreWritable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = fs::metadata(&self.dir) {
+                let mut mode = meta.permissions();
+                mode.set_mode(0o755);
+                let _ = fs::set_permissions(&self.dir, mode);
+            }
+            let _ = fs::remove_dir_all(&self.scratch);
+        }
     }
 
     /// Both writers put the whole body in place and leave no temporary,
@@ -233,27 +282,37 @@ mod tests {
         let d = scratch("ro");
         let sub = d.join("sub");
         fs::create_dir(&sub).unwrap();
+        let _restore = RestoreWritable::new(&sub, &d);
         let mut mode = fs::metadata(&sub).unwrap().permissions();
         mode.set_mode(0o555);
         fs::set_permissions(&sub, mode).unwrap();
-        // False when the write succeeded: this process is not stopped by mode 0555.
-        if !writes_are_denied(&sub) {
-            eprintln!(
-                "a_write_into_a_read_only_directory_is_permission_denied: mode 0555 does not deny \
-                 writes (euid {}); skipping the DAC check",
-                unsafe { libc::geteuid() }
-            );
-            let mut mode = fs::metadata(&sub).unwrap().permissions();
-            mode.set_mode(0o755);
-            fs::set_permissions(&sub, mode).unwrap();
-            let _ = fs::remove_dir_all(&d);
+        if skip_when_0555_write_succeeds(
+            "a_write_into_a_read_only_directory_is_permission_denied",
+            &sub,
+        ) {
             return;
         }
         let err = write_own(&sub.join("x"), b"x").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// A directory left mode `0555` with a file in it is writable again,
+    /// and gone, when the guard drops. Without the mode restore the
+    /// removal cannot unlink the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_0555_directory_is_removed_when_the_guard_drops() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("restore");
+        let sub = d.join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("a"), b"a").unwrap();
         let mut mode = fs::metadata(&sub).unwrap().permissions();
-        mode.set_mode(0o755);
+        mode.set_mode(0o555);
         fs::set_permissions(&sub, mode).unwrap();
-        let _ = fs::remove_dir_all(&d);
+        {
+            let _restore = RestoreWritable::new(&sub, &d);
+        }
+        assert!(!d.exists(), "mode 0555 directory stayed behind");
     }
 }
