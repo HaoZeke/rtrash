@@ -1107,12 +1107,24 @@ mod tests {
     fn an_overridden_home_stays_on_this_thread() {
         use super::{home_dir, override_home};
         let pinned = std::env::temp_dir().join("rtrash-pattern-home-absent");
+        let nested = std::env::temp_dir().join("rtrash-pattern-home-nested");
         let real = home_dir();
         assert_ne!(real.as_deref(), Some(pinned.as_path()));
+        assert_ne!(real.as_deref(), Some(nested.as_path()));
+        let outer = override_home(Some(pinned.clone()));
+        assert_eq!(home_dir().as_deref(), Some(pinned.as_path()));
+        let seen = std::thread::spawn(home_dir).join().expect("home thread");
+        assert_eq!(seen, real, "another thread must keep the real home");
         {
-            let _pin = override_home(Some(pinned.clone()));
-            assert_eq!(home_dir().as_deref(), Some(pinned.as_path()));
+            let _inner = override_home(Some(nested.clone()));
+            assert_eq!(home_dir().as_deref(), Some(nested.as_path()));
         }
+        assert_eq!(
+            home_dir().as_deref(),
+            Some(pinned.as_path()),
+            "inner drop must restore the outer override"
+        );
+        drop(outer);
         assert_eq!(home_dir(), real);
     }
 

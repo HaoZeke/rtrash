@@ -8353,56 +8353,14 @@ impl Drop for Holder {
     }
 }
 
-/// How many live processes `who` could not inspect, when this process
-/// is root and that count is not zero. `None` otherwise.
-///
-/// The count is the `unreadable` field of `who --json`. `who` fills it
-/// in `holders::scan_in`, which ignores an exited process (state `Z`,
-/// `X` or `x`). The kernel refuses that process's fd directory even
-/// for root, so the first `PermissionDenied` there is not a reason to
-/// skip: a transient zombie would skip a run that can still see every
-/// live process. A user namespace maps the caller to root and leaves
-/// other live processes unreadable. On macOS the answer is none.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn live_unreadable_as_root() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: geteuid has no preconditions.
-        if unsafe { libc::geteuid() } != 0 {
-            return None;
-        }
-        // Nothing holds this path, so the object is only the count and
-        // no holder's text can repeat the field name.
-        let probe = std::env::temp_dir().join("rtrash-who-unread-probe");
-        let out = common::rtrash_real(common::Real::NoTrash)
-            .args(["who", "--json"])
-            .arg(&probe)
-            .output()
-            .unwrap_or_else(|e| panic!("who --json: {e}"));
-        let text = String::from_utf8_lossy(&out.stdout);
-        if !text.contains("\"unreadable\":") {
-            panic!(
-                "who --json exit {:?} gave no unreadable count\nstdout: {text}\nstderr: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        let n = who_unreadable(&text);
-        if n > 0 {
-            return Some(n);
-        }
-    }
-    None
-}
-
+/// Names the process holding this test's own file. A path nobody holds
+/// is judged from each `who` on its own: one scan's `unreadable` count
+/// does not decide another scan's line, and a short-lived process in
+/// another test does not skip this one. The "run as root" hint is
+/// required only when this process is not root.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn who_names_the_process_holding_a_file_or_its_directory() {
-    if let Some(n) = live_unreadable_as_root() {
-        let noun = if n == 1 { "process" } else { "processes" };
-        common::skip(&format!("{n} live {noun} could not be inspected; skipping"));
-        return;
-    }
     let sb = Sandbox::new("who");
     let held = sb.touch("held.log");
     sb.touch("idle.log");
@@ -8431,32 +8389,43 @@ fn who_names_the_process_holding_a_file_or_its_directory() {
     assert!(json.contains(&format!("\"user\":\"{user}\"")), "{json}");
     assert!(json.contains("\"cmdline\":"), "{json}");
     assert!(!json.contains("no process holds"), "{json}");
+    // SAFETY: geteuid has no preconditions.
+    let root = unsafe { libc::geteuid() } == 0;
     let out = sb.run(&["who", "idle.log"]);
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
     let idle = stdout_of(&out);
+    let err = stderr_of(&out);
     assert!(
         idle.contains("idle.log: no process holds this path"),
         "{idle}"
     );
-    let counted = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
+    if idle.contains("partial") {
+        assert!(
+            idle.contains("could not be inspected") && err.contains("could not be inspected"),
+            "{idle}\n{err}"
+        );
+        assert_eq!(err.contains("run as root"), !root, "{err}");
+    } else {
+        assert!(!err.contains("could not be inspected"), "{idle}\n{err}");
+    }
+    let json_out = sb.run(&["who", "--json", "idle.log"]);
+    assert_eq!(json_out.status.code(), Some(1), "{}", stdout_of(&json_out));
+    let counted = stdout_of(&json_out);
     assert_eq!(counted.lines().count(), 1, "{counted}");
-    let unread = counted
-        .trim()
-        .rsplit_once("\"unreadable\":")
-        .and_then(|(_, n)| n.trim_end_matches('}').parse::<u64>().ok())
-        .unwrap_or(0);
+    assert!(counted.contains("\"holders\":[]"), "{counted}");
+    let unread = who_unreadable(&counted);
+    let json_err = stderr_of(&json_out);
     if unread > 0 {
         assert!(
-            idle.contains("the result is partial") && idle.contains("could not be inspected"),
-            "{idle}"
+            json_err.contains("could not be inspected"),
+            "unreadable {unread}: {json_err}"
         );
-        let err = stderr_of(&out);
-        assert!(
-            err.contains("could not be inspected") && err.contains("run as root"),
-            "unreadable {unread}: {err}"
-        );
+        assert_eq!(json_err.contains("run as root"), !root, "{json_err}");
     } else {
-        assert!(!idle.contains("partial"), "{idle}");
+        assert!(
+            !json_err.contains("could not be inspected"),
+            "unreadable 0: {json_err}"
+        );
     }
 }
 
