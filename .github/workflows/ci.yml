@@ -236,6 +236,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -244,6 +246,11 @@ jobs:
       - name: Skip-note log for passing tests
         shell: bash
         run: echo "RTRASH_SKIP_LOG=${RUNNER_TEMP//\\//}/rtrash-skips.txt" >> "$GITHUB_ENV"
+
+      # Not a default member. The unix-only test helpers are dead_code on
+      # this target unless they are cfg-gated.
+      - name: Clippy optional rtrash-hud member
+        run: cargo clippy --locked -p rtrash-hud --all-targets -- -D warnings
 
       # No rsync here: the msys2 and Cygwin ports read a C:\ path as a
       # remote host, so the rsync half of the filter-from test skips.

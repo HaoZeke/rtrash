@@ -1,8 +1,11 @@
 # rtrash-hud
 
-A small desktop status display of trash size and item count. It asks the
-`rtrash` library for the same numbers `rtrash status` prints
-(`status::summarize_dirs`) and does not parse `.trashinfo` files itself.
+A small desktop status display of the trash item count and reclaimable
+size. It asks the `rtrash` library for the same numbers `rtrash status`
+prints (`status::summarize_dirs_readonly`) and does not parse
+`.trashinfo` files itself. The read does not take the trash lock and
+does not rewrite `directorysizes`. There is no age filter; `rtrash
+status --older-than` is the command that has one.
 
 It is an optional workspace member. `cargo build` and `cargo test` at the
 repository root build the CLI only, and the musl release tarball does not
@@ -20,4 +23,11 @@ when the `rtrash-hud` binary is on `PATH`.
 
 The display reads a FreeDesktop trash. It does not read the Finder Trash
 or the Recycle Bin. On macOS, where Finder is the default, pass
-`--trash-dir` or choose the FreeDesktop home trash.
+`--trash-dir` or set `RTRASH_MACOS_TRASH=freedesktop` (or `macos.trash =
+"freedesktop"` in the config).
+
+`--json` prints one object. The keys are `items`, `bytes`, and `roots`.
+Each root has `path`, `items`, `bytes`, `orphans`, and `dangling`. These
+are not the `rtrash status --json` names (`total_items`, `total_bytes`,
+and the `fs_*` fields). With no trash found, the two status lines go to
+stderr, as `rtrash status` writes them.

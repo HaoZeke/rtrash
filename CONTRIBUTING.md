@@ -8,8 +8,10 @@ CI (`.github/workflows/ci.yml`) runs the same commands on `main`/PRs. Prefer **`
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo clippy --locked --all-targets --no-default-features -- -D warnings
+cargo clippy --locked -p rtrash-hud --all-targets -- -D warnings
 cargo nextest run --locked --profile ci   # or: cargo test --locked
 cargo nextest run --locked --profile ci --no-default-features
+cargo test --locked -p rtrash-hud --all-targets
 cargo deny check                          # needs cargo-deny; policy in deny.toml
 ```
 
@@ -52,7 +54,7 @@ Numeric names like `42.fixed.md` link to GitHub issue `#42`. Prefer `+slug.type.
 
 ## Version lockstep (cocogitto)
 
-`cog.toml` bumps `Cargo.toml`, `pyproject.toml`, and `docs/source/conf.py` together and leaves `CHANGELOG.md` to towncrier (`disable_changelog = true`).
+`cog.toml` bumps `Cargo.toml`, `pyproject.toml`, `crates/rtrash-hud/Cargo.toml` (its package version, and a pinned `rtrash` dependency version when one is set), and `docs/source/conf.py` together and leaves `CHANGELOG.md` to towncrier (`disable_changelog = true`). `scripts/check-version-lockstep.sh` checks the three package versions and that pin.
 
 ## Pre-commit (prek)
 

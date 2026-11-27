@@ -13,6 +13,9 @@ cargo clippy --locked --all-targets -- -D warnings
 echo "==> cargo clippy --locked --all-targets --no-default-features -- -D warnings"
 cargo clippy --locked --all-targets --no-default-features -- -D warnings
 
+echo "==> cargo clippy --locked -p rtrash-hud --all-targets -- -D warnings"
+cargo clippy --locked -p rtrash-hud --all-targets -- -D warnings
+
 if command -v cargo-nextest >/dev/null 2>&1 || cargo nextest --version >/dev/null 2>&1; then
   echo "==> cargo nextest run --locked --profile ci"
   cargo nextest run --locked --profile ci
@@ -34,5 +37,8 @@ elif cargo deny --version >/dev/null 2>&1; then
 else
   echo "==> cargo deny: skipped (install cargo-deny)"
 fi
+
+echo "==> cargo test --locked -p rtrash-hud --all-targets"
+cargo test --locked -p rtrash-hud --all-targets
 
 echo "quality bar OK"

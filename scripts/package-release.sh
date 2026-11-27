@@ -106,7 +106,7 @@ package_one() {
   local NAME="rtrash-${VERSION}-${TARGET}"
   echo "==> target=${TARGET} version=${VERSION}"
 
-  echo "==> cargo build --release --target ${TARGET}"
+  echo "==> cargo build --release --target ${TARGET} -p rtrash"
   if ! rustc --print target-list 2>/dev/null | grep -qx "${TARGET}"; then
     if command -v rustup >/dev/null 2>&1; then
       rustup target add "${TARGET}"

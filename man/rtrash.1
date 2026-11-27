@@ -1073,7 +1073,12 @@ and the JSON roots carry the count as
 .PP
 The optional
 .B rtrash-hud
-program prints this same count. It is the workspace member
+program prints this same item count and reclaimable size. It does not
+take the trash lock or rewrite
+.IR directorysizes ,
+and it has no age filter
+.RB ( \-\-older\-than
+is this command only). It is the workspace member
 .I crates/rtrash-hud
 and is not built with the
 .B rtrash
@@ -1084,7 +1089,29 @@ parse trash records itself. It reads a FreeDesktop trash (the same
 .B \-\-trash\-dir
 and
 .B \-\-home\-only
-pins), not the Finder Trash or the Recycle Bin.
+pins), not the Finder Trash or the Recycle Bin. On macOS, where Finder
+is the default, pass
+.B \-\-trash\-dir
+or set
+.B RTRASH_MACOS_TRASH=freedesktop
+(or
+.B macos.trash
+to
+.BR freedesktop ).
+Its
+.B \-\-json
+object uses
+.BR items ", " bytes
+and
+.B roots
+.RB ( path ", " items ", " bytes ", " orphans ", " dangling ),
+not the
+.BR total_items ", " total_bytes
+and
+.B fs_*
+names of this command's
+.BR \-\-json .
+With no trash found, the same two lines this command writes go to stderr.
 .TP
 .B \-\-home\-only
 Only the home trash
