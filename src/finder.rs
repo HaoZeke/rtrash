@@ -1725,7 +1725,7 @@ mod tests {
         let dev = fs::metadata(&trash).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&trash);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let out = shm.join(format!("rtrash-finder-pub-out-{pid}"));

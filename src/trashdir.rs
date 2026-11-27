@@ -6423,7 +6423,9 @@ mod tests {
             .status()
             .is_ok_and(|s| s.success());
         if !owned {
-            eprintln!("note: chown to uid 65534 unavailable; foreign owner check skipped");
+            crate::test_skip::skip(
+                "note: chown to uid 65534 unavailable; foreign owner check skipped",
+            );
             let _ = fs::remove_dir_all(&top);
             return;
         }
@@ -6827,7 +6829,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let src = root.join("src");
@@ -8057,6 +8059,48 @@ proc /proc proc rw 0 0
         }
     }
 
+    /// The skip writer, including the stand-in the race proof uses when
+    /// `RTRASH_SKIP_LOG` is unset, opens that path with `O_NOFOLLOW`. A
+    /// symlink there is not written through. A regular file still takes
+    /// every line, so the open is not exclusive.
+    #[test]
+    fn a_skip_log_does_not_follow_a_symlink() {
+        let dir =
+            std::env::temp_dir().join(format!("rtrash-skiplog-nofollow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        fs::write(&target, b"SEED\n").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        {
+            let _guard = crate::test_skip::override_log(&link);
+            crate::test_skip::skip("nofollow probe");
+        }
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"SEED\n",
+            "the skip log followed a symlink"
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let plain = dir.join("plain");
+        {
+            let _guard = crate::test_skip::override_log(&plain);
+            crate::test_skip::skip("plain probe");
+            crate::test_skip::skip("plain probe again");
+        }
+        let written = fs::read_to_string(&plain).expect("skip log");
+        assert!(
+            written.contains("a_skip_log_does_not_follow_a_symlink")
+                && written.contains("plain probe again"),
+            "{written}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn reuse_tries(tag: &str) {
         use std::os::unix::fs::MetadataExt;
         let _seams = ClearSeams;
@@ -8424,7 +8468,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return None;
         }
         let td = TrashDir {
@@ -8453,7 +8497,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let td = TrashDir {
@@ -8660,7 +8704,7 @@ proc /proc proc rw 0 0
         let dev = fs::metadata(&root).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
             let _ = fs::remove_dir_all(&root);
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let td = TrashDir {

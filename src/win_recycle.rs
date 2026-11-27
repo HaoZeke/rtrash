@@ -7172,7 +7172,7 @@ mod tests {
             if e.raw_os_error() == Some(libc::EILSEQ)
                 || e.kind() == std::io::ErrorKind::InvalidInput
             {
-                eprintln!("skipped: the file system refused the name: {e}");
+                crate::test_skip::skip(&format!("skipped: the file system refused the name: {e}"));
                 let _ = std::fs::remove_dir_all(&dir);
                 return;
             }

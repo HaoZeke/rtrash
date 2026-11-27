@@ -7,7 +7,9 @@
 //! thread and leaves the process environment alone: other threads in the
 //! same `cargo test` process are reading it. When the variable is unset,
 //! [`log_when_unset`] names a stand-in for that thread only, and a value
-//! in the environment still wins.
+//! in the environment still wins. The stand-in is opened with `O_NOFOLLOW`,
+//! the same final-component check the trash walks use, so a symlink at
+//! that name is not followed.
 
 use std::cell::RefCell;
 use std::io::Write;
@@ -71,6 +73,13 @@ fn log_path() -> Option<PathBuf> {
 
 /// Parties that must still be inside their log override while this thread's
 /// [`skip`] reads the path and writes the line.
+///
+/// The inode-race proof needs that overlap. Its proof threads wait here
+/// while they still hold their own logs, and the skipping thread counts
+/// as a party too, so the write runs only after everyone has arrived and
+/// the others leave only once the line is written. Without the hold the
+/// proof threads can drop their overrides first, and a process-wide
+/// `RTRASH_SKIP_LOG` can put the real note in a proof log.
 pub struct SkipHold {
     lock: Mutex<Meet>,
     cv: Condvar,
@@ -107,8 +116,8 @@ impl SkipHold {
         drop(guard);
     }
 
-    /// Wait until every party is in [`wait_until_written`], then run `write`
-    /// before letting them leave.
+    /// Count this thread as a party, wait until the others have arrived in
+    /// [`wait_until_written`], run `write`, then let them leave.
     fn during_write(&self, write: impl FnOnce()) {
         let mut guard = self.lock.lock().unwrap();
         guard.here += 1;
@@ -182,13 +191,32 @@ fn record(why: &str) {
     let current = std::thread::current();
     let test = current.name().unwrap_or("?");
     let line = format!("{bin} {test}: {why}\n");
-    let wrote = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)
-        .and_then(|mut file| file.write_all(line.as_bytes()));
+    let wrote = open_skip_log(&log).and_then(|mut file| file.write_all(line.as_bytes()));
     if let Err(e) = wrote {
         let shown = log.display().to_string();
         eprintln!("RTRASH_SKIP_LOG {shown}: {e}");
+    }
+}
+
+/// Append to `log`, or create it. On Unix the final component is opened
+/// with `O_NOFOLLOW`, the flag `openat` takes in the trash walks. A stat
+/// that refused a symlink, and then a following open, would miss a name
+/// swapped in between the two.
+fn open_skip_log(log: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(log)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
     }
 }

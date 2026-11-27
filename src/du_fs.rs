@@ -859,7 +859,7 @@ mod tests {
                         found += 1;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        eprintln!("{p} not tested: it does not exist here");
+                        crate::test_skip::skip(&format!("{p} not tested: it does not exist here"));
                     }
                     Err(e) => panic!("{p}: {e}"),
                 }

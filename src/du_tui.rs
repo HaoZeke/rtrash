@@ -3819,7 +3819,7 @@ mod tests {
         let shm = Path::new("/dev/shm");
         let dev = fs::metadata(&t.0).unwrap().dev();
         if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
-            eprintln!("no second file system here; skipping");
+            crate::test_skip::skip("no second file system here; skipping");
             return;
         }
         let pin = shm.join(format!("rtrash-dutui-midcopy-{}", std::process::id()));
