@@ -184,4 +184,23 @@ mod tests {
         assert_eq!(got, None);
         assert!(start.elapsed() < wait() + Duration::from_secs(30));
     }
+
+    /// The type is the mount table's type for the longest prefix, and a
+    /// look at a local path returns what the closure produced.
+    #[test]
+    fn the_root_type_comes_from_the_mount_table() {
+        let path = Path::new("/");
+        let table = crate::trashdir::read_mount_table().expect("mount table");
+        let mounts = crate::trashdir::mount_table(&table);
+        let points: Vec<PathBuf> = mounts.iter().map(|(m, _)| m.clone()).collect();
+        let top = crate::trashdir::longest_mount_prefix(path, &points);
+        let expect = mounts
+            .iter()
+            .find(|(m, _)| *m == top)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_default();
+        assert!(!expect.is_empty(), "{expect:?}");
+        assert_eq!(fs_type_of(path), expect);
+        assert_eq!(probe(path, |p| p.to_path_buf()), Some(PathBuf::from("/")));
+    }
 }

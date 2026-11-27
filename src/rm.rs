@@ -753,6 +753,11 @@ mod tests {
             resolve_pattern(&format!("{l}/s*/x")),
             Some(format!("{r}/s*/x"))
         );
+        // A trailing slash is part of the pattern after the link is resolved.
+        assert_eq!(
+            resolve_pattern(&format!("{l}/sub/")),
+            Some(format!("{r}/sub/"))
+        );
         // A link as the final name is not followed: it names the trashed item.
         assert_eq!(resolve_pattern(&format!("{r}/sub")), None);
         assert_eq!(resolve_pattern(&format!("{}/link", base.display())), None);

@@ -203,4 +203,17 @@ mod tests {
         assert!(!is_mount_root(&sub, &fs::metadata(&sub).unwrap()));
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn the_resolved_home_directory_is_home() {
+        let raw = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .expect("HOME");
+        let home = fs::canonicalize(&raw).unwrap_or_else(|_| PathBuf::from(&raw));
+        assert!(is_home(&home));
+        let other = std::env::temp_dir();
+        if other != home {
+            assert!(!is_home(&other));
+        }
+    }
 }

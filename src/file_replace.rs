@@ -205,4 +205,24 @@ mod tests {
         assert_eq!(names(&d), ["link.txt", "target.txt"]);
         let _ = fs::remove_dir_all(&d);
     }
+
+    /// A directory that cannot be written stays as it is, and the error
+    /// is the permission error from the open, not a missing temporary.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_into_a_read_only_directory_is_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("ro");
+        let sub = d.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let mut mode = fs::metadata(&sub).unwrap().permissions();
+        mode.set_mode(0o555);
+        fs::set_permissions(&sub, mode).unwrap();
+        let err = write_own(&sub.join("x"), b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let mut mode = fs::metadata(&sub).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&sub, mode).unwrap();
+        let _ = fs::remove_dir_all(&d);
+    }
 }

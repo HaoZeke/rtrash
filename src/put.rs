@@ -1322,6 +1322,11 @@ mod json_tests {
             trash_overlap(&t.join("xdg"), &link),
             Some(Overlap::Contains)
         );
+        // Inside by the link name only: the resolved trash is a different path.
+        assert_eq!(
+            trash_overlap(&link.join("files/x"), &link),
+            Some(Overlap::Inside)
+        );
         let _ = fs::remove_dir_all(&t);
     }
 
@@ -1459,6 +1464,37 @@ mod json_tests {
             got.map(|it| it.payload),
             Some(PathBuf::from("/mnt/c/$Recycle.Bin/S-1/$Rdrive"))
         );
+    }
+
+    /// Maps are read for a directory, an executable or a library, and
+    /// not for an ordinary file. Each kind is the only reason it matches.
+    #[test]
+    fn maps_are_read_only_for_what_stays_mapped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rtrash-map-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bare = dir.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        let mut mode = fs::metadata(&bare).unwrap().permissions();
+        mode.set_mode(0o644);
+        fs::set_permissions(&bare, mode).unwrap();
+        assert!(mappable(&bare), "directory");
+        let exe = dir.join("tool");
+        fs::write(&exe, b"x").unwrap();
+        let mut mode = fs::metadata(&exe).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&exe, mode).unwrap();
+        assert!(mappable(&exe), "executable");
+        fs::write(dir.join("libx.so"), b"x").unwrap();
+        assert!(mappable(&dir.join("libx.so")), "shared library");
+        fs::write(dir.join("libx.dylib"), b"x").unwrap();
+        assert!(mappable(&dir.join("libx.dylib")), "dylib");
+        fs::write(dir.join("note.txt"), b"x").unwrap();
+        assert!(!mappable(&dir.join("note.txt")), "plain file");
+        let mut mode = fs::metadata(&bare).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&bare, mode).unwrap();
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

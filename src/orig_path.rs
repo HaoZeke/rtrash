@@ -560,4 +560,46 @@ mod tests {
         assert!(!selects(&[norm(typed)], Path::new(r"C:\Users\A\File.TX")));
         assert!(!selects(&[norm(typed)], Path::new(r"C:\Users\A\Other.TXT")));
     }
+
+    /// A missing last component stays once, after the resolved prefix.
+    #[test]
+    fn a_missing_tail_keeps_the_resolved_prefix_once() {
+        let dir = scratch("prefix");
+        let missing = dir.join("real").join("gone");
+        let got = resolve_parent(&missing);
+        let expect = crate::util::plain_path(&dir.join("real")).join("gone");
+        assert_eq!(got, expect);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `expand` keeps a real path. An empty result would select nothing.
+    #[test]
+    fn expand_keeps_a_real_path() {
+        let dir = scratch("expand");
+        let file = dir.join("real").join("n");
+        std::fs::write(&file, b"x").unwrap();
+        let got = expand(&[file.display().to_string()]);
+        assert!(got.iter().any(|g| g.ends_with("/n")), "{got:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A near miss is a longer path of the operand, not every other path.
+    #[test]
+    fn a_near_miss_is_only_a_longer_path_of_the_operand() {
+        let dir = scratch("near");
+        let want = dir.join("real").join("a");
+        let sibling = dir.join("real").join("ab");
+        let other = dir.join("real").join("z");
+        let notes = notices(
+            &[want.display().to_string()],
+            &[sibling.clone(), other.clone()],
+            &[sibling.clone(), other.clone()],
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        match &notes[0].1 {
+            Notice::Miss(near) => assert_eq!(near, &vec![sibling], "{near:?}"),
+            Notice::Outside | Notice::Empty => panic!("{notes:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

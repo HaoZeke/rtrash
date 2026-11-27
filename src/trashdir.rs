@@ -5783,6 +5783,83 @@ mod tests {
         out
     }
 
+    /// The same directory is one trash, however many times it is named.
+    #[test]
+    fn a_trash_root_counts_once() {
+        let (root, td) = put_trash("rootset");
+        let mut seen = RootSet::default();
+        assert!(seen.first(&td.root));
+        assert!(!seen.first(&td.root));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A temporary a crashed put left is not the file the next put writes.
+    #[test]
+    fn a_leftover_put_temporary_is_not_reused() {
+        let (root, td) = put_trash("puttemp");
+        let stale = td
+            .info()
+            .join(format!("{PUT_TEMP_PREFIX}{}.0", std::process::id()));
+        fs::write(&stale, b"stale").unwrap();
+        let (temp, file) = create_put_temp(&td.info()).unwrap();
+        drop(file);
+        assert_ne!(temp, stale);
+        assert_eq!(fs::read(&stale).unwrap(), b"stale");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Only the errors of a file system with no hard links take the
+    /// in-place record path. A real I/O error does not.
+    #[test]
+    fn only_a_missing_hard_link_feature_is_that_error() {
+        assert!(hard_links_unsupported(&io::Error::from_raw_os_error(
+            libc::EPERM
+        )));
+        assert!(!hard_links_unsupported(&io::Error::from_raw_os_error(
+            libc::EIO
+        )));
+    }
+
+    /// A line of exactly the cap is a line. One byte more is ignored.
+    #[test]
+    fn a_directorysizes_line_of_exactly_the_cap_is_kept() {
+        let prefix = b"1 2 ";
+        let mut line = prefix.to_vec();
+        line.resize(SIZE_LINE_MAX, b'a');
+        let parsed = directorysizes_parse_line(&line).unwrap();
+        assert_eq!(parsed.size, 1);
+        assert_eq!(parsed.name.len(), SIZE_LINE_MAX - prefix.len());
+        line.push(b'a');
+        assert!(directorysizes_parse_line(&line).is_none());
+    }
+
+    /// The volume of a real path is an absolute prefix of it.
+    #[test]
+    fn a_real_path_has_a_volume_top() {
+        let path = std::env::temp_dir();
+        let top = volume_top_of_path(&path).expect("volume");
+        assert!(top.is_absolute(), "{top:?}");
+        assert!(path.starts_with(&top), "{path:?} {top:?}");
+    }
+
+    /// An empty directory this user cannot write is not wholly removable.
+    /// The access check is what says so: nothing inside it is blocked.
+    #[test]
+    fn an_empty_unwritable_directory_cannot_be_removed() {
+        let root = std::env::temp_dir().join(format!("rtrash-ro-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let d = root.join("d");
+        fs::create_dir_all(&d).unwrap();
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
+        // Root may write anywhere, so only an ordinary user sees the refusal.
+        if unsafe { libc::geteuid() } != 0 {
+            let err = tree_removable(&d, &fs::symlink_metadata(&d).unwrap()).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        }
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A put writes its record under a temporary name and links it into
     /// place: the trash then has the record alone, with one link, and a
     /// clash takes the next name the same way.
