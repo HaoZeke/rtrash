@@ -208,6 +208,8 @@ mod tests {
 
     /// A directory that cannot be written stays as it is, and the error
     /// is the permission error from the open, not a missing temporary.
+    /// A process that can write a mode `0555` directory (root, or
+    /// CAP_DAC_OVERRIDE) does not see that error; the check is skipped.
     #[cfg(unix)]
     #[test]
     fn a_write_into_a_read_only_directory_is_permission_denied() {
@@ -218,6 +220,21 @@ mod tests {
         let mut mode = fs::metadata(&sub).unwrap().permissions();
         mode.set_mode(0o555);
         fs::set_permissions(&sub, mode).unwrap();
+        let probe = sub.join(".dac-probe");
+        let denied = fs::write(&probe, b"x").is_err();
+        let _ = fs::remove_file(&probe);
+        if !denied {
+            eprintln!(
+                "a_write_into_a_read_only_directory_is_permission_denied: mode 0555 does not deny \
+                 writes (euid {}); skipping the DAC check",
+                unsafe { libc::geteuid() }
+            );
+            let mut mode = fs::metadata(&sub).unwrap().permissions();
+            mode.set_mode(0o755);
+            fs::set_permissions(&sub, mode).unwrap();
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
         let err = write_own(&sub.join("x"), b"x").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         let mut mode = fs::metadata(&sub).unwrap().permissions();
