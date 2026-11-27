@@ -59,24 +59,53 @@ fn path_bytes(part: &[u8]) -> PathBuf {
 pub(crate) struct FilesFrom {
     src: Option<String>,
     nul: bool,
+    /// The list flag was `--files0-from`. `--zero` does not set this.
+    files0: bool,
 }
 
 /// Why a put path list could not be read.
 pub(crate) enum FilesFromError {
     /// The flags themselves are wrong. Exit 2.
     Usage(&'static str),
-    /// FILE could not be read. Exit 1.
-    Read { src: String, err: io::Error },
+    /// FILE could not be read. Exit 1. `flag` is the option that named it.
+    Read {
+        flag: &'static str,
+        src: String,
+        err: io::Error,
+    },
+}
+
+fn list_flag(files0: bool) -> &'static str {
+    if files0 {
+        "--files0-from"
+    } else {
+        "--files-from"
+    }
+}
+
+fn one_list(files0: bool) -> &'static str {
+    if files0 {
+        "only one --files0-from is allowed"
+    } else {
+        "only one --files-from is allowed"
+    }
+}
+
+fn stdin_prompt(files0: bool) -> &'static str {
+    if files0 {
+        "--files0-from=- and a prompt both read standard input"
+    } else {
+        "--files-from=- and a prompt both read standard input"
+    }
 }
 
 impl FilesFromError {
     pub(crate) fn message(&self) -> String {
         match self {
             Self::Usage(msg) => (*msg).to_string(),
-            Self::Read { src, err } => format!(
-                "cannot read --files-from '{}': {err}",
-                crate::util::err_path(src)
-            ),
+            Self::Read { flag, src, err } => {
+                format!("cannot read {flag} '{}': {err}", crate::util::err_path(src))
+            }
         }
     }
 }
@@ -108,33 +137,30 @@ impl FilesFrom {
             return self.store_list(rest, false);
         }
         if arg == "--files-from" || arg == "--files0-from" {
+            let files0 = arg == "--files0-from";
             if self.src.is_some() {
-                return Err("only one --files-from is allowed");
+                return Err(one_list(files0));
             }
-            let nul = arg == "--files0-from";
             *i += 1;
             let Some(path) = args.get(*i) else {
-                return Err(if nul {
+                return Err(if files0 {
                     "--files0-from requires a value"
                 } else {
                     "--files-from requires a value"
                 });
             };
-            self.src = Some(path.clone());
-            if nul {
-                self.nul = true;
-            }
-            return Ok(true);
+            return self.store_list(path, files0);
         }
         Ok(false)
     }
 
-    fn store_list(&mut self, path: &str, nul: bool) -> Result<bool, &'static str> {
+    fn store_list(&mut self, path: &str, files0: bool) -> Result<bool, &'static str> {
         if self.src.is_some() {
-            return Err("only one --files-from is allowed");
+            return Err(one_list(files0));
         }
-        if nul {
+        if files0 {
             self.nul = true;
+            self.files0 = true;
         }
         self.src = Some(path.to_string());
         Ok(true)
@@ -146,11 +172,11 @@ impl FilesFrom {
         self.nul = true;
     }
 
-    /// `--files-from=-` and a prompt both read stdin. `None` when the
-    /// list is a file, or when this run does not prompt.
+    /// The list is `-` and this run also prompts, so both would read stdin.
+    /// The message names the flag that was given.
     pub(crate) fn refuse_stdin_prompt(&self, prompts: bool) -> Option<&'static str> {
         if prompts && self.src.as_deref() == Some("-") {
-            Some("--files-from=- and a prompt both read standard input")
+            Some(stdin_prompt(self.files0))
         } else {
             None
         }
@@ -168,6 +194,7 @@ impl FilesFrom {
         match read_path_list(src, self.nul) {
             Ok(paths) => Ok(paths),
             Err(err) => Err(FilesFromError::Read {
+                flag: list_flag(self.files0),
                 src: src.clone(),
                 err,
             }),
@@ -312,7 +339,7 @@ mod tests {
         let mut j = 0;
         assert_eq!(
             list.take_flag(&again, &mut j),
-            Err("only one --files-from is allowed")
+            Err("only one --files0-from is allowed")
         );
         let mut bare = FilesFrom::default();
         let args = vec!["--files0-from".into()];
@@ -340,5 +367,35 @@ mod tests {
         let mut i = 0;
         assert_eq!(file.take_flag(&args, &mut i), Ok(true));
         assert_eq!(file.refuse_stdin_prompt(true), None);
+
+        let mut nul = FilesFrom::default();
+        let args = vec!["--files0-from=-".into()];
+        let mut i = 0;
+        assert_eq!(nul.take_flag(&args, &mut i), Ok(true));
+        assert_eq!(
+            nul.refuse_stdin_prompt(true),
+            Some("--files0-from=- and a prompt both read standard input")
+        );
+    }
+
+    #[test]
+    fn errors_name_the_flag_that_was_used() {
+        let mut list = FilesFrom::default();
+        let args = vec!["--files0-from=a".into(), "--files-from=b".into()];
+        let mut i = 0;
+        assert_eq!(list.take_flag(&args, &mut i), Ok(true));
+        i = 1;
+        assert_eq!(
+            list.take_flag(&args, &mut i),
+            Err("only one --files-from is allowed")
+        );
+
+        let mut missing = FilesFrom::default();
+        let args = vec!["--files0-from=/no/such/rtrash-files0-from-list".into()];
+        let mut i = 0;
+        assert_eq!(missing.take_flag(&args, &mut i), Ok(true));
+        let msg = missing.load().unwrap_err().message();
+        assert!(msg.starts_with("cannot read --files0-from "), "{msg}");
+        assert!(!msg.contains("cannot read --files-from "), "{msg}");
     }
 }

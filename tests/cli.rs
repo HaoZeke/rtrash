@@ -68,6 +68,10 @@ impl Sandbox {
     }
 
     /// Like `run`, but feeds `stdin` to the child (interactive restore selection).
+    ///
+    /// A usage error can exit before the child reads, which closes the pipe.
+    /// `BrokenPipe` is not a failure of the test: the caller still waits and
+    /// asserts the exit status.
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
         let mut child = common::rtrash(&self.root)
             .args(args)
@@ -79,7 +83,11 @@ impl Sandbox {
             .expect("failed to spawn rtrash");
         {
             let mut w = child.stdin.take().expect("stdin");
-            w.write_all(stdin.as_bytes()).unwrap();
+            match w.write_all(stdin.as_bytes()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("failed to write stdin: {e}"),
+            }
         }
         child.wait_with_output().expect("failed to wait rtrash")
     }
@@ -1092,6 +1100,101 @@ fn put_i_refuses_files_from_on_stdin() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.work().join("b.txt").exists(), "b.txt stayed");
     assert!(sb.work().join("a.txt").exists(), "a.txt was trashed");
+}
+
+/// `--files0-from` is named in the read error and in the one-list error.
+/// A message that always says `--files-from` fails this.
+#[test]
+fn put_files0_from_errors_name_that_flag() {
+    let sb = Sandbox::new("put-files0-err");
+    sb.touch("keep.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let work = sb.work();
+    let out =
+        common::assert_refused_unchanged(&"missing files0", &[work.as_path()], 1, &[], || {
+            sb.run(&["put", &pin, "--files0-from=missing-list0"])
+        });
+    let err = stderr_of(&out);
+    assert!(err.contains("cannot read --files0-from "), "{err}");
+    assert!(!err.contains("cannot read --files-from "), "{err}");
+
+    let out = common::assert_refused_unchanged(&"second flag", &[work.as_path()], 2, &[], || {
+        sb.run(&[
+            "put",
+            &pin,
+            "--files-from=missing-list0",
+            "--files0-from=also-missing",
+        ])
+    });
+    let err = stderr_of(&out);
+    assert!(err.contains("only one --files0-from is allowed"), "{err}");
+}
+
+/// Run `args` on a terminal through script(1). `None` without script.
+/// A child still running after `secs` is killed: that is the put browser
+/// waiting for a key, and the test fails.
+#[cfg(target_os = "linux")]
+fn terminal_within(sb: &Sandbox, args: &str, secs: u64) -> Option<Output> {
+    let script = script_bin()?;
+    let cmd = format!("{} {args}", bin());
+    let out_path = sb.root.join("tty.out");
+    let err_path = sb.root.join("tty.err");
+    let mut child = Command::new(script)
+        .args(["-qec", &cmd, "/dev/null"])
+        .current_dir(sb.work())
+        .env("SHELL", "/bin/sh")
+        .env("NO_COLOR", "1")
+        .env("HOME", &sb.root)
+        .env("USERPROFILE", &sb.root)
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("RTRASH_MACOS_TRASH", "freedesktop")
+        .env("RTRASH_TEST_BIN_DIR", common::test_bin(&sb.root))
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&out_path).unwrap())
+        .stderr(fs::File::create(&err_path).unwrap())
+        .spawn()
+        .expect("failed to run script");
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(secs) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("rtrash on a terminal still running after {secs} s; the put browser opened");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Some(Output {
+        status,
+        stdout: fs::read(&out_path).unwrap(),
+        stderr: fs::read(&err_path).unwrap(),
+    })
+}
+
+/// An empty `--files-from` on a terminal is a missing operand. Passing
+/// `false` instead of `listed` to `browse_empty` opens the browser, and
+/// this test then fails the hang guard.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_empty_files_from_on_a_terminal_does_not_open_the_browser() {
+    let sb = Sandbox::new("put-files-tty");
+    let list = sb.root.join("empty-list");
+    fs::write(&list, "\n").unwrap();
+    let args = format!(
+        "put --trash-dir={} --files-from={}",
+        sb.trash().display(),
+        list.display()
+    );
+    let Some(out) = terminal_within(&sb, &args, 5) else {
+        common::skip("skipping: no script(1) to give rtrash a terminal");
+        return;
+    };
+    let shown = format!("{}{}", stdout_of(&out), stderr_of(&out));
+    assert_eq!(out.status.code(), Some(2), "{shown}");
+    assert!(shown.contains("missing operand"), "{shown}");
 }
 
 /// Run rtrash in `cwd` with the trash under `data_home`.

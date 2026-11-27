@@ -2318,7 +2318,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
       --files-from=FILE  also trash the paths in FILE, one per line
                    (- reads stdin). Blank lines are skipped and a
                    trailing CR is ignored. Paths on the command line
-                   go first
+                   go first. --inspect and --files-from=- both read
+                   stdin
       --files0-from=FILE  NUL-separated paths, as find -print0 writes
                    them; the same as --files-from with -0
   -0, --zero       separate --files-from paths with NUL, as find
