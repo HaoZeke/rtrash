@@ -1244,6 +1244,28 @@ fn reparse_open(look: ReparseLook, reopened: bool) -> ReparseOpen {
     }
 }
 
+/// What to do with a handle once [`reparse_open`] has classified it.
+/// `reopen` runs only for a first reopen. A second one is the filter
+/// error, so the reparse buffer is not read. Both Windows matches call
+/// this, and the unit test runs on every platform.
+#[cfg(any(windows, test))]
+fn apply_reparse_open<T>(
+    decision: ReparseOpen,
+    reopened: bool,
+    file: T,
+    reopen: impl FnOnce(T) -> io::Result<T>,
+) -> io::Result<T> {
+    match decision {
+        ReparseOpen::Plain => Ok(file),
+        ReparseOpen::Refuse(why) => Err(io::Error::new(io::ErrorKind::InvalidData, why)),
+        ReparseOpen::Reopen if !reopened => reopen(file),
+        ReparseOpen::Reopen => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reparse data was not read through its filter",
+        )),
+    }
+}
+
 fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
     #[cfg(unix)]
     {
@@ -1261,16 +1283,16 @@ fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
             .read(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
-        // The flag above skips filters. A name surrogate is not file
-        // data. A data tag is reopened from this handle, not by path, so
-        // a symlink raced in after the lstat is not followed. A plain
-        // file keeps this handle. A tag that cannot be confirmed is an
-        // error: reading this handle would return the reparse buffer.
-        match reparse_open(reparse_look(&file), false) {
-            ReparseOpen::Plain => Ok(file),
-            ReparseOpen::Reopen => reopen_without_reparse_flag(file),
-            ReparseOpen::Refuse(why) => Err(io::Error::new(io::ErrorKind::InvalidData, why)),
-        }
+        // The flag above skips filters. [`apply_reparse_open`] keeps a
+        // plain file, reopens a data tag from this handle, and refuses
+        // the rest. Reading a refused handle would return the reparse
+        // buffer, or follow a symlink raced in after the lstat.
+        apply_reparse_open(
+            reparse_open(reparse_look(&file), false),
+            false,
+            file,
+            reopen_without_reparse_flag,
+        )
     }
 }
 
@@ -1367,16 +1389,19 @@ fn reopen_without_reparse_flag(file: std::fs::File) -> io::Result<std::fs::File>
             "reopened file is not the same file",
         ));
     }
-    match reparse_open(reparse_look(&again), true) {
-        ReparseOpen::Plain => Ok(again),
-        ReparseOpen::Refuse(why) => Err(io::Error::new(io::ErrorKind::InvalidData, why)),
-        // `reparse_open` does not ask for a second reopen. This arm is
-        // the same refusal, so a change there cannot read the buffer.
-        ReparseOpen::Reopen => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "reparse data was not read through its filter",
-        )),
-    }
+    // A second reopen is refused inside [`apply_reparse_open`]. The
+    // closure is the same refusal if that function asks for one anyway.
+    apply_reparse_open(
+        reparse_open(reparse_look(&again), true),
+        true,
+        again,
+        |_| {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "reparse data was not read through its filter",
+            ))
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1789,9 +1814,7 @@ mod tests {
     }
 
     /// The Windows open keeps a plain file, reopens a data tag once, and
-    /// refuses a surrogate or a tag it cannot confirm. Replacing either
-    /// match in the open with `Ok(file)` would still pass every open
-    /// test on Linux; this is the decision those matches call.
+    /// refuses a surrogate or a tag it cannot confirm.
     #[test]
     fn a_reparse_open_refuses_reopens_or_keeps_the_handle() {
         use super::{reparse_open, ReparseLook, ReparseOpen};
@@ -1822,6 +1845,33 @@ mod tests {
             true,
             "reparse data was not read through its filter",
         );
+    }
+
+    /// Applying the decision keeps a plain handle, reopens once, and
+    /// refuses a second reopen. Replacing that with `Ok(file)` fails
+    /// here, on Linux as well as on Windows.
+    #[test]
+    fn apply_reparse_open_keeps_reopens_or_refuses() {
+        use super::{apply_reparse_open, ReparseOpen};
+        let kept = apply_reparse_open(ReparseOpen::Plain, false, 7, |_| panic!("reopen")).unwrap();
+        assert_eq!(kept, 7);
+        let kept = apply_reparse_open(ReparseOpen::Plain, true, 7, |_| panic!("reopen")).unwrap();
+        assert_eq!(kept, 7);
+        let reopened = apply_reparse_open(ReparseOpen::Reopen, false, 7, |n| Ok(n + 1)).unwrap();
+        assert_eq!(reopened, 8);
+        let err = apply_reparse_open(ReparseOpen::Reopen, true, 7, |_| panic!("second reopen"))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.to_string(),
+            "reparse data was not read through its filter"
+        );
+        let err = apply_reparse_open(ReparseOpen::Refuse("not a regular file"), false, 7, |_| {
+            panic!("reopen")
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "not a regular file");
     }
 
     /// Set `key` for this test and put the previous value back, including
