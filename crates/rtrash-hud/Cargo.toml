@@ -18,4 +18,5 @@ dist = false
 rtrash = { path = "../..", default-features = false }
 
 [dev-dependencies]
+libc = "0.2"
 rtrash = { path = "../..", default-features = false }

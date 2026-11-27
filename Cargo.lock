@@ -664,6 +664,7 @@ dependencies = [
 name = "rtrash-hud"
 version = "0.1.5"
 dependencies = [
+ "libc",
  "rtrash",
 ]
 

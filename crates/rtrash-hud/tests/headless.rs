@@ -4,6 +4,8 @@ use std::process::Command;
 
 #[cfg(unix)]
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -407,7 +409,7 @@ impl Drop for GlobalState {
         // SAFETY: the descriptor is the one `global_state` opened, and
         // LOCK_UN releases the exclusive lock it took.
         unsafe {
-            flock(self.0.as_raw_fd(), LOCK_UN);
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
@@ -427,19 +429,60 @@ fn global_state() -> GlobalState {
         .unwrap();
     // SAFETY: `file` is open. LOCK_EX waits for the same file the CLI
     // tests lock, and the guard releases it on drop.
-    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX) };
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     assert_eq!(rc, 0, "flock {}", path.display());
     GlobalState(file)
 }
 
+/// The marker is a regular file. `Path::is_file` follows a link, so a
+/// symlink to any file would pass and `remove_dir_all` could wipe a
+/// trash this run did not create.
 #[cfg(target_os = "linux")]
-const LOCK_EX: i32 = 2;
-#[cfg(target_os = "linux")]
-const LOCK_UN: i32 = 8;
+fn marker_is_regular_file(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join(".rtrash-hud-volume")).is_ok_and(|m| m.file_type().is_file())
+}
 
+/// Remove `path` only when it is still the directory recorded at
+/// creation and its marker is a regular file.
 #[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn flock(fd: i32, op: i32) -> i32;
+fn remove_owned_volume(path: &Path, dev: u64, ino: u64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_dir() || meta.dev() != dev || meta.ino() != ino {
+        return false;
+    }
+    if !marker_is_regular_file(path) {
+        return false;
+    }
+    fs::remove_dir_all(path).is_ok()
+}
+
+/// A marker that is a symlink to a regular file used to pass `is_file`,
+/// and the cleanup then deleted the trash. The marker has to be a
+/// regular file, and the directory has to be the one this run created.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_symlink_marker_does_not_remove_a_volume_trash() {
+    use std::os::unix::fs::MetadataExt;
+    let home = Tmp::trash("marker-link");
+    let marker = home.0.join(".rtrash-hud-volume");
+    let target = home.0.join("files").join("vol.txt");
+    let record = home.0.join("info").join("vol.txt.trashinfo");
+    fs::write(&target, b"volume-payload").unwrap();
+    fs::write(
+        &record,
+        "[Trash Info]\nPath=/tmp/hud-volume\nDeletionDate=2026-01-02T03:04:05\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&target, &marker).unwrap();
+    assert!(marker.is_file(), "Path::is_file follows the marker link");
+    assert!(!marker_is_regular_file(&home.0));
+    let meta = fs::symlink_metadata(&home.0).unwrap();
+    assert!(!remove_owned_volume(&home.0, meta.dev(), meta.ino()));
+    assert!(record.is_file());
+    assert!(target.is_file());
 }
 
 /// `--home-only` with no pin is the home trash alone. Forcing `home_only`
@@ -447,47 +490,68 @@ unsafe extern "C" {
 #[cfg(target_os = "linux")]
 #[test]
 fn home_only_with_no_pin_skips_a_volume_trash() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     // Declared first so it drops last, after the planted trash is removed.
     let _global = global_state();
     let uid = rtrash::trashdir::uid();
-    let mut planted = None;
-    for mp in rtrash::trashdir::mount_points() {
-        if mp == std::path::Path::new("/") {
-            continue;
-        }
-        let dir = mp.join(format!(".Trash-{uid}"));
-        if dir.exists() {
-            if dir.join(".rtrash-hud-volume").is_file() {
-                let _ = fs::remove_dir_all(&dir);
-            } else {
-                continue;
-            }
-        }
-        if fs::create_dir(&dir).is_err() {
-            continue;
-        }
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(dir.join(".rtrash-hud-volume"), b"fixture").unwrap();
-        fs::create_dir_all(dir.join("files")).unwrap();
-        fs::create_dir_all(dir.join("info")).unwrap();
-        fs::write(dir.join("files").join("vol.txt"), b"volume-payload").unwrap();
-        fs::write(
-            dir.join("info").join("vol.txt.trashinfo"),
-            "[Trash Info]\nPath=/tmp/hud-volume\nDeletionDate=2026-01-02T03:04:05\n",
-        )
-        .unwrap();
-        planted = Some(dir);
-        break;
+    let scratch = std::env::temp_dir().join(format!(
+        "rtrash-hud-vol-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&scratch).unwrap();
+    let mounted = Command::new("sudo")
+        .args(["-n", "mount", "--bind"])
+        .arg(&scratch)
+        .arg(&scratch)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(mounted, "a volume trash needs its own mount point");
+    let trash = scratch.join(format!(".Trash-{uid}"));
+    assert!(
+        fs::symlink_metadata(&trash).is_err(),
+        "this run's mount already had a volume trash"
+    );
+    fs::create_dir(&trash).unwrap();
+    fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+    let made = fs::symlink_metadata(&trash).unwrap();
+    let (dev, ino) = (made.dev(), made.ino());
+    fs::write(trash.join(".rtrash-hud-volume"), b"fixture").unwrap();
+    fs::create_dir_all(trash.join("files")).unwrap();
+    fs::create_dir_all(trash.join("info")).unwrap();
+    fs::write(trash.join("files").join("vol.txt"), b"volume-payload").unwrap();
+    fs::write(
+        trash.join("info").join("vol.txt.trashinfo"),
+        "[Trash Info]\nPath=/tmp/hud-volume\nDeletionDate=2026-01-02T03:04:05\n",
+    )
+    .unwrap();
+    struct Gone {
+        trash: PathBuf,
+        dev: u64,
+        ino: u64,
+        mount: PathBuf,
     }
-    let volume = planted.expect("no writable mount for a .Trash-$uid fixture");
-    struct Gone(PathBuf);
     impl Drop for Gone {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            let _ = remove_owned_volume(&self.trash, self.dev, self.ino);
+            let _ = Command::new("sudo")
+                .args(["-n", "umount"])
+                .arg(&self.mount)
+                .status();
+            let _ = fs::remove_dir_all(&self.mount);
         }
     }
-    let _gone = Gone(volume.clone());
+    let _gone = Gone {
+        trash: trash.clone(),
+        dev,
+        ino,
+        mount: scratch,
+    };
+    let volume = trash;
     let seen = rtrash::trashdir::resolve_dirs_opts(&[], false);
     assert!(
         seen.iter().any(|d| d.root == volume),
