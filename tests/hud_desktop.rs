@@ -95,6 +95,7 @@ fn a_bump_keeps_the_hud_crate_on_the_same_version() {
         "docs/source/conf.py",
         "crates/rtrash-hud/Cargo.toml",
         "scripts/check-version-lockstep.sh",
+        "scripts/bump-version.pl",
     ] {
         let dest = root.join(rel);
         fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -114,10 +115,17 @@ fn a_bump_keeps_the_hud_crate_on_the_same_version() {
     let cog = fs::read_to_string(repo.join("cog.toml")).unwrap();
     let hooks = bump_hooks(&cog);
     assert!(
-        hooks
-            .iter()
-            .any(|h| h.contains("crates/rtrash-hud/Cargo.toml")),
-        "cog.toml pre_bump_hooks do not name the hud crate: {hooks:?}"
+        hooks.iter().any(|h| h.contains("scripts/bump-version.pl")),
+        "cog.toml pre_bump_hooks do not run scripts/bump-version.pl: {hooks:?}"
+    );
+    assert!(
+        hooks.iter().all(|h| !h.contains("sed")),
+        "a bump hook still calls sed: {hooks:?}"
+    );
+    let bumper = fs::read_to_string(repo.join("scripts/bump-version.pl")).unwrap();
+    assert!(
+        bumper.contains("crates/rtrash-hud/Cargo.toml"),
+        "bump-version.pl does not name the hud package"
     );
     for hook in &hooks {
         let cmd = hook.replace("{{version}}", "9.9.9");
@@ -152,6 +160,15 @@ fn a_bump_keeps_the_hud_crate_on_the_same_version() {
     let err = String::from_utf8_lossy(&matched.stderr);
     assert!(matched.status.success(), "{text}{err}");
     assert!(text.contains("9.9.9"), "{text}");
+    let conf = fs::read_to_string(root.join("docs/source/conf.py")).unwrap();
+    assert!(
+        conf.lines().any(|row| row == "release = \"9.9.9\""),
+        "conf.py release was not bumped:\n{conf}"
+    );
+    assert!(
+        conf.lines().any(|row| row == "version = \"0.1\""),
+        "conf.py short version moved:\n{conf}"
+    );
 
     let pin_left = bumped.replace(
         "rtrash = { path = \"../..\", version = \"9.9.9\", default-features = false }",
