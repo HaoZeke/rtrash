@@ -25,6 +25,14 @@ Harness rejects =trash-put= when it is multi-call rtrash.
 
 * Measured results (Linux x86_64, 2026-07-08)
 
+This is the last 400-file put/empty compare shipped in-tree.
+The table below is still rtrash 0.1.2 (release build of that tree).
+Re-run =benches/compare_trash_cli.py= before quoting it as current.
+List, EXDEV put, and 10k+ empty are unmeasured by this harness
+(=n_small=400=; ASV params 50/200).
+Later sections of this page are other measurements, including du runs
+from 2026-10-13 and 2026-10-14.
+
 | Tool | put avg (s) | empty avg (s) |
 |------+-------------+---------------|
 | rtrash 0.1.2 release | 0.005449 | 0.002986 |
@@ -33,7 +41,7 @@ Harness rejects =trash-put= when it is multi-call rtrash.
 
 Both tools: =ec=0=, =entries=401= after put, empty leaves =files_left=0= =info_left=0=, =LIST_OK= for a single-file put.
 Optional peers trashy/gtrash: missing on the host.
-Earlier 2026-07-07 snapshot (~13× / ~12×) superseded by the 2026-07-08 table.
+Earlier 2026-07-07 snapshot (~13× / ~12×). Of the two 400-file put/empty compares, the 2026-07-08 table is the later one.
 
 * du against dua, gdu and du (Linux x86_64, 2026-10-13)
 

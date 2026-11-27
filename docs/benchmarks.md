@@ -32,8 +32,10 @@ On the 2026-07-08 run they were not installed.
 
 ## Measured results (Linux x86_64, 2026-07-08)
 
-Host class: **Linux x86_64** (`sysname=Linux machine=x86_64`, build host for this tree).
-Peers: **rtrash 0.1.2** (release build of this tree), **trash-cli 0.24.5.26** (isolated venv; not multi-call rtrash).
+This is the last 400-file put/empty compare shipped in-tree. The table below is still **rtrash 0.1.2**. Re-run `benches/compare_trash_cli.py` before quoting it as current. List, EXDEV put, and 10k+ empty are **unmeasured** by this harness (`n_small=400`; ASV params 50/200). Later sections of this page are other measurements, including `du` runs from 2026-10-10, 2026-10-13, and 2026-10-14.
+
+Host class: **Linux x86_64** (`sysname=Linux machine=x86_64`, the host of that run).
+Peers: **rtrash 0.1.2** (release build of that tree), **trash-cli 0.24.5.26** (isolated venv; not multi-call rtrash).
 Optional: trashy **missing**, gtrash **missing**.
 
 From `benches/compare_trash_cli.py` (two trials each; log ends with `COMPARE_OK`):
@@ -49,7 +51,7 @@ Both tools: `ec=0`, multi-entry trash after put (`entries=401`), empty leaves `f
 ### Earlier snapshot (same host class, 2026-07-07)
 
 Prior run (rtrash 0.1.0 vs trash-cli 0.24.5.26): put ~0.00507 s / empty ~0.00267 s vs trash-cli ~0.0674 / ~0.0334 (~13× / ~12×).
-Absolute times vary with load and filesystem state; prefer the **2026-07-08** table above as the current dated numbers.
+Absolute times vary with load and filesystem state. Of the two 400-file put/empty compares, the **2026-07-08** table is the later one.
 
 ## Safety (not a timer)
 
@@ -116,7 +118,7 @@ Warm runs: 2 warmups and 10 timed runs. Cold runs: 3, each after dropping the pa
 | synthetic | 500000 | 1101 |
 
 Mean wall time in milliseconds, ± one standard deviation.
-"Before" means rtrash 0.1.4 at `242a601`, and "after" means the current tree.
+"Before" means rtrash 0.1.4 at `242a601`, and "after" means rtrash 0.1.4 at `c9db258`.
 
 | Tree, cache | `rtrash du` before | `rtrash du` after | `--no-git` after | du -s | diskus | dust | dua | pdu | gdu |
 |:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
