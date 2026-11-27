@@ -7446,17 +7446,310 @@ proc /proc proc rw 0 0
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Planted {
+        Keep,
+        Symlink,
+        Directory,
+    }
+
+    thread_local! {
+        /// Remove the replacement before it is classified, so the try is a
+        /// missing path rather than a file system that kept another inode.
+        static FORCE_MISSING_REPLACEMENT: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+        /// Count a regular file as another inode, so a file system that
+        /// does reuse one still takes the skip.
+        static FORCE_OTHER_INODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// Plant a symlink or a directory where the regular replacement was.
+        static PLANT_REPLACEMENT: std::cell::Cell<Planted> =
+            const { std::cell::Cell::new(Planted::Keep) };
+        /// When set, the skip line is this text instead of the platform sentence.
+        static SKIP_NOTE: std::cell::RefCell<Option<&'static str>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    struct Flag {
+        cell: &'static std::thread::LocalKey<std::cell::Cell<bool>>,
+    }
+
+    impl Flag {
+        fn raise(cell: &'static std::thread::LocalKey<std::cell::Cell<bool>>) -> Self {
+            cell.with(|c| c.set(true));
+            Self { cell }
+        }
+    }
+
+    impl Drop for Flag {
+        fn drop(&mut self) {
+            self.cell.with(|c| c.set(false));
+        }
+    }
+
+    struct Plant;
+
+    impl Plant {
+        fn set(kind: Planted) -> Self {
+            PLANT_REPLACEMENT.with(|c| c.set(kind));
+            Self
+        }
+    }
+
+    impl Drop for Plant {
+        fn drop(&mut self) {
+            PLANT_REPLACEMENT.with(|c| c.set(Planted::Keep));
+        }
+    }
+
+    struct SkipNote;
+
+    impl SkipNote {
+        fn set(text: &'static str) -> Self {
+            SKIP_NOTE.with(|c| *c.borrow_mut() = Some(text));
+            Self
+        }
+    }
+
+    impl Drop for SkipNote {
+        fn drop(&mut self) {
+            SKIP_NOTE.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    /// Point this thread's skip notes at `log`. The process environment
+    /// is left alone, so another thread's skip still reaches
+    /// `RTRASH_SKIP_LOG`. The race proof waits inside this guard, so a
+    /// process-wide assignment of that variable would be visible to the
+    /// real thread's skip.
+    fn with_skip_log<T>(log: &Path, body: impl FnOnce() -> T) -> T {
+        let _guard = crate::test_skip::override_log(log);
+        body()
+    }
+
+    fn panic_text(err: Box<dyn std::any::Any + Send>) -> String {
+        match err.downcast_ref::<String>() {
+            Some(s) => s.clone(),
+            None => match err.downcast_ref::<&str>() {
+                Some(s) => (*s).to_string(),
+                None => String::new(),
+            },
+        }
+    }
+
     /// A symlink replaced by a regular file that reused its inode is not
     /// the file that was linked. The published name is removed and the
-    /// trash record does not stay.
+    /// trash record does not stay. A regular file with another inode is a
+    /// file system that did not reuse it: the test tries a bounded number
+    /// of times and then skips. A missing path, or anything that is not a
+    /// regular file, means the setup never created that file, and fails.
     #[test]
     fn a_reused_symlink_inode_does_not_leave_an_unrecorded_payload() {
+        reuse_tries("reuse-ino");
+    }
+
+    /// Removing the replacement is not a file system that refused the
+    /// inode. The run fails, and it does not write a skip note.
+    #[test]
+    fn a_missing_replacement_fails_instead_of_skipping() {
+        let log = std::env::temp_dir().join(format!("rtrash-skiplog-miss-{}", std::process::id()));
+        let _ = fs::remove_file(&log);
+        let _flag = Flag::raise(&FORCE_MISSING_REPLACEMENT);
+        let caught = with_skip_log(&log, || {
+            std::panic::catch_unwind(|| reuse_tries("reuse-miss"))
+        });
+        let msg = panic_text(caught.expect_err("a missing replacement skipped or passed"));
+        assert!(
+            msg.contains("replacement") && msg.contains("is missing"),
+            "{msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("skipping"),
+            "a missing replacement was skipped: {msg}"
+        );
+        let written = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !written.contains("a_missing_replacement_fails_instead_of_skipping"),
+            "a missing replacement was recorded as a skip: {written}"
+        );
+        let _ = fs::remove_file(&log);
+    }
+
+    /// A forced other inode takes the skip. The note is recorded on this
+    /// thread's log, which stderr capture does not hide.
+    #[test]
+    fn a_forced_non_reuse_skips_and_writes_the_skip_log() {
+        let log = std::env::temp_dir().join(format!("rtrash-skiplog-other-{}", std::process::id()));
+        let _ = fs::remove_file(&log);
+        let _flag = Flag::raise(&FORCE_OTHER_INODE);
+        with_skip_log(&log, || reuse_tries("reuse-other"));
+        let written = fs::read_to_string(&log).expect("skip log");
+        assert!(
+            written.contains("the platform did not reuse the symlink inode"),
+            "{written}"
+        );
+        assert!(written.contains("skipping"), "{written}");
+        assert!(
+            written.contains("a_forced_non_reuse_skips_and_writes_the_skip_log"),
+            "{written}"
+        );
+        let _ = fs::remove_file(&log);
+    }
+
+    /// A symlink or a directory in place of the replacement is not a file
+    /// system that refused the inode. Each run fails and writes no skip.
+    #[test]
+    fn a_symlink_or_directory_replacement_fails_instead_of_skipping() {
+        let cases = [
+            (Planted::Symlink, "reuse-nonsym", "symlink"),
+            (Planted::Directory, "reuse-nondir", "directory"),
+        ];
+        for (kind, tag, label) in cases {
+            let log =
+                std::env::temp_dir().join(format!("rtrash-skiplog-{tag}-{}", std::process::id()));
+            let _ = fs::remove_file(&log);
+            let _plant = Plant::set(kind);
+            let caught = with_skip_log(&log, || std::panic::catch_unwind(|| reuse_tries(tag)));
+            let msg = match caught {
+                Err(err) => panic_text(err),
+                Ok(()) => panic!("{label} replacement skipped or passed"),
+            };
+            assert!(msg.contains("is not a regular file"), "{label}: {msg}");
+            assert!(
+                !msg.to_lowercase().contains("skipping"),
+                "{label} replacement was skipped: {msg}"
+            );
+            let written = fs::read_to_string(&log).unwrap_or_default();
+            assert!(
+                !written.contains("a_symlink_or_directory_replacement_fails_instead_of_skipping"),
+                "{label} replacement was recorded as a skip: {written}"
+            );
+            let _ = fs::remove_file(&log);
+        }
+    }
+
+    /// The real thread's note reaches the process log while both proof
+    /// threads hold their own logs across that read and write. The note is
+    /// a race marker, not the platform sentence. `RTRASH_SKIP_LOG` is never
+    /// assigned: when CI has set it, the marker is checked there, and when
+    /// it is unset the real thread uses a stand-in file of its own.
+    #[test]
+    fn a_real_skip_reaches_the_process_log_beside_the_proofs() {
+        const MARKER: &str = "race-proof marker: process log stayed reachable";
+        let pid = std::process::id();
+        let real_name = format!("real-inode-race-{pid}");
+        let from_env = std::env::var_os("RTRASH_SKIP_LOG").map(PathBuf::from);
+        let own_log = from_env.is_none();
+        let real_log = from_env.unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("rtrash-skiplog-race-real-{pid}"))
+        });
+        if own_log {
+            let _ = fs::remove_file(&real_log);
+        }
+        let miss_log = std::env::temp_dir().join(format!("rtrash-skiplog-race-miss-{pid}"));
+        let other_log = std::env::temp_dir().join(format!("rtrash-skiplog-race-other-{pid}"));
+        let _ = fs::remove_file(&miss_log);
+        let _ = fs::remove_file(&other_log);
+        let hold = crate::test_skip::SkipHold::new(3);
+        let real = {
+            let hold = std::sync::Arc::clone(&hold);
+            let real_log = real_log.clone();
+            let name = real_name.clone();
+            std::thread::Builder::new()
+                .name(name)
+                .spawn(move || {
+                    let _fallback = own_log.then(|| crate::test_skip::log_when_unset(&real_log));
+                    let _armed = crate::test_skip::arm_hold(hold);
+                    let _flag = Flag::raise(&FORCE_OTHER_INODE);
+                    let _note = SkipNote::set(MARKER);
+                    reuse_tries("reuse-race-real");
+                })
+                .unwrap()
+        };
+        let miss = {
+            let hold = std::sync::Arc::clone(&hold);
+            let miss_log = miss_log.clone();
+            std::thread::Builder::new()
+                .name(format!("race-miss-skip-{pid}"))
+                .spawn(move || {
+                    let _flag = Flag::raise(&FORCE_MISSING_REPLACEMENT);
+                    let caught = with_skip_log(&miss_log, || {
+                        hold.wait_until_written();
+                        std::panic::catch_unwind(|| reuse_tries("reuse-race-miss"))
+                    });
+                    let msg =
+                        panic_text(caught.expect_err("a missing replacement skipped or passed"));
+                    assert!(msg.contains("is missing"), "{msg}");
+                    let written = fs::read_to_string(&miss_log).unwrap_or_default();
+                    assert!(
+                        !written.contains("race-miss-skip"),
+                        "a missing replacement was recorded as a skip: {written}"
+                    );
+                })
+                .unwrap()
+        };
+        let other = {
+            let hold = std::sync::Arc::clone(&hold);
+            let other_log = other_log.clone();
+            std::thread::Builder::new()
+                .name(format!("race-other-skip-{pid}"))
+                .spawn(move || {
+                    let _flag = Flag::raise(&FORCE_OTHER_INODE);
+                    with_skip_log(&other_log, || {
+                        hold.wait_until_written();
+                        reuse_tries("reuse-race-other");
+                    });
+                    let written = fs::read_to_string(&other_log).unwrap_or_default();
+                    assert!(
+                        written.contains("race-other-skip") && written.contains("skipping"),
+                        "{written}"
+                    );
+                })
+                .unwrap()
+        };
+        real.join().unwrap();
+        miss.join().unwrap();
+        other.join().unwrap();
+        let miss_written = fs::read_to_string(&miss_log).unwrap_or_default();
+        let other_written = fs::read_to_string(&other_log).unwrap_or_default();
+        assert!(
+            !miss_written.contains(&real_name) && !other_written.contains(&real_name),
+            "the real note was written to a proof log"
+        );
+        let _ = fs::remove_file(&miss_log);
+        let _ = fs::remove_file(&other_log);
+        let written = fs::read_to_string(&real_log).unwrap_or_default();
+        let line = written
+            .lines()
+            .find(|line| line.contains(&real_name))
+            .unwrap_or("");
+        assert!(
+            line.contains(MARKER),
+            "real note missing from the process log: {written}"
+        );
+        assert!(
+            !line.contains("did not reuse the symlink inode") && !line.contains("skipping"),
+            "the race proof wrote the platform sentence: {line}"
+        );
+        assert!(
+            !written.contains(&format!("race-miss-skip-{pid}"))
+                && !written.contains(&format!("race-other-skip-{pid}")),
+            "a proof note landed in the process log: {written}"
+        );
+        if own_log {
+            let _ = fs::remove_file(&real_log);
+        }
+    }
+
+    fn reuse_tries(tag: &str) {
         use std::os::unix::fs::MetadataExt;
         let _seams = ClearSeams;
-        let (root, td) = put_trash("reuse-ino");
+        let (root, td) = put_trash(tag);
         let item = root.join("sym");
+        // APFS often does not reuse the inode a symlink just freed.
+        const REUSE_TRIES: usize = 64;
         let mut proved = false;
-        for _ in 0..64 {
+        let mut saw_other = false;
+        for _ in 0..REUSE_TRIES {
             let _ = fs::remove_file(&item);
             for dir in [td.files(), td.info()] {
                 for entry in fs::read_dir(&dir).unwrap().flatten() {
@@ -7471,10 +7764,52 @@ proc /proc proc rw 0 0
             REUSE_LINK_SRC.with(|c| c.set(true));
             let meta = fs::symlink_metadata(&item).unwrap();
             let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
-            let Ok(now) = fs::symlink_metadata(&item) else {
-                continue;
+            if FORCE_MISSING_REPLACEMENT.with(|c| c.get()) {
+                let _ = fs::remove_file(&item);
+            }
+            match PLANT_REPLACEMENT.with(|c| c.get()) {
+                Planted::Keep => {}
+                Planted::Symlink => {
+                    fs::remove_file(&item).unwrap();
+                    std::os::unix::fs::symlink("elsewhere", &item).unwrap();
+                }
+                Planted::Directory => {
+                    fs::remove_file(&item).unwrap();
+                    fs::create_dir(&item).unwrap();
+                }
+            }
+            let now = match fs::symlink_metadata(&item) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&root);
+                    if crate::util::is_missing(&e) {
+                        panic!(
+                            "the replacement '{}' is missing, so this is not a file system \
+                             that refused to reuse the symlink inode ({e})",
+                            item.display()
+                        );
+                    }
+                    panic!(
+                        "the replacement '{}' could not be read, so this is not a file system \
+                         that refused to reuse the symlink inode ({e})",
+                        item.display()
+                    );
+                }
             };
-            if now.ino() != ino || !now.is_file() {
+            if !now.is_file() {
+                let _ = fs::remove_dir_all(&root);
+                panic!(
+                    "the replacement '{}' is not a regular file, so this is not a file system \
+                     that refused to reuse the symlink inode",
+                    item.display()
+                );
+            }
+            // Set only from a test, or from outside the run. A real other
+            // inode is what APFS leaves; the flag pretends this one is.
+            let refused = std::env::var_os("RTRASH_TEST_NO_INODE_REUSE").is_some()
+                || FORCE_OTHER_INODE.with(|c| c.get());
+            if refused || now.ino() != ino {
+                saw_other = true;
                 continue;
             }
             assert_eq!(fs::read(&item).unwrap(), b"reused-inode", "{err}");
@@ -7484,8 +7819,22 @@ proc /proc proc rw 0 0
             proved = true;
             break;
         }
-        assert!(proved, "the file system did not reuse the symlink inode");
         let _ = fs::remove_dir_all(&root);
+        if proved {
+            return;
+        }
+        assert!(
+            saw_other,
+            "the symlink inode test ended with no regular file of another inode"
+        );
+        let noted = SKIP_NOTE.with(|c| c.borrow().map(str::to_string));
+        let why = match noted {
+            Some(text) => text,
+            None => format!(
+                "the platform did not reuse the symlink inode in {REUSE_TRIES} tries; skipping"
+            ),
+        };
+        crate::test_skip::skip(&why);
     }
 
     /// A file planted at the published name after `linkat` is not the link

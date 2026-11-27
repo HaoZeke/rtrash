@@ -114,6 +114,11 @@ pub mod tui_term;
 pub mod undo;
 pub mod who;
 
+/// Skip notes for unit tests. Compiled on Unix, where `trashdir`'s tests
+/// call it; integration tests include the same file through `#[path]`.
+#[cfg(all(test, unix))]
+mod test_skip;
+
 // Windows CLI surface: system Recycle Bin (not FreeDesktop modules).
 #[cfg(windows)]
 pub mod empty {
