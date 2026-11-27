@@ -6836,6 +6836,20 @@ fn status_json_and_age_filter() {
     );
 }
 
+/// `--json` with no trash writes the status object to stdout and leaves
+/// stderr empty. The two "no trash" lines are the text display only.
+#[test]
+fn status_json_with_no_trash_leaves_stderr_empty() {
+    let sb = Sandbox::new("status-json-none");
+    let out = sb.run(&["status", "--json", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stderr_of(&out), "");
+    assert_eq!(
+        stdout_of(&out),
+        "{\n  \"roots\": [\n  ],\n  \"total_items\": 0,\n  \"total_bytes\": 0\n}\n"
+    );
+}
+
 fn batch_of(sb: &Sandbox, name: &str) -> String {
     let body = fs::read_to_string(sb.trash().join(format!("info/{name}.trashinfo"))).unwrap();
     body.lines()

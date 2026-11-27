@@ -344,6 +344,26 @@ fn no_trash_is_reported_on_stderr() {
     assert_eq!(stderr, "No trash directories found\nTotal: 0 items (0 B)\n");
 }
 
+/// `--json` with no trash writes the empty object to stdout and leaves
+/// stderr empty. The text display is the path that uses stderr.
+#[cfg(unix)]
+#[test]
+fn no_trash_json_leaves_stderr_empty() {
+    let home = Tmp::dir("no-trash-json");
+    let out = Command::new(bin())
+        .args(["--home-only", "--json"])
+        .env("XDG_DATA_HOME", &home.0)
+        .env("HOME", &home.0)
+        .env("RTRASH_MACOS_TRASH", "freedesktop")
+        .output()
+        .expect("run rtrash-hud --json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(stdout, "{\"items\":0,\"bytes\":0,\"roots\":[]}\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn the_finder_default_is_refused_without_a_pin() {
@@ -361,12 +381,61 @@ fn the_finder_default_is_refused_without_a_pin() {
     assert!(stderr.contains("macos.trash"), "{stderr}");
 }
 
+/// The flock `tests/cli.rs` takes around a real mount, so a bare `empty`
+/// in another test process waits until this volume trash is gone.
+#[cfg(target_os = "linux")]
+struct GlobalState(std::fs::File);
+
+#[cfg(target_os = "linux")]
+impl Drop for GlobalState {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: the descriptor is the one `global_state` opened, and
+        // LOCK_UN releases the exclusive lock it took.
+        unsafe {
+            flock(self.0.as_raw_fd(), LOCK_UN);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn global_state() -> GlobalState {
+    use std::os::unix::io::AsRawFd;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("rtrash-global-state.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap();
+    // SAFETY: `file` is open. LOCK_EX waits for the same file the CLI
+    // tests lock, and the guard releases it on drop.
+    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX) };
+    assert_eq!(rc, 0, "flock {}", path.display());
+    GlobalState(file)
+}
+
+#[cfg(target_os = "linux")]
+const LOCK_EX: i32 = 2;
+#[cfg(target_os = "linux")]
+const LOCK_UN: i32 = 8;
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn flock(fd: i32, op: i32) -> i32;
+}
+
 /// `--home-only` with no pin is the home trash alone. Forcing `home_only`
 /// false would also count the volume trash planted here.
 #[cfg(target_os = "linux")]
 #[test]
 fn home_only_with_no_pin_skips_a_volume_trash() {
     use std::os::unix::fs::PermissionsExt;
+    // Declared first so it drops last, after the planted trash is removed.
+    let _global = global_state();
     let uid = rtrash::trashdir::uid();
     let mut planted = None;
     for mp in rtrash::trashdir::mount_points() {

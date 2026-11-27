@@ -1111,7 +1111,23 @@ and
 .B fs_*
 names of this command's
 .BR \-\-json .
-With no trash found, the same two lines this command writes go to stderr.
+With no trash found, the text display writes those two lines to stderr.
+With
+.BR \-\-json ,
+this program and
+.B rtrash status
+write only their JSON object to stdout and leave stderr empty: this
+program prints
+.B {"items":0,"bytes":0,"roots":[]}
+and
+.B status
+prints its own object, with an empty
+.B roots
+array and
+.B total_items
+and
+.B total_bytes
+of 0.
 .TP
 .B \-\-home\-only
 Only the home trash
@@ -1216,8 +1232,19 @@ for one with no line starting
 .BR Path= ,
 and
 .RB \(oq "[Errno N] TEXT: 'FILE'" \(cq
-for one it cannot open (a directory, a dangling symlink, no read
-permission).
+for one it cannot open (a directory, or a file it cannot read).
+A
+.I .trashinfo
+that is a symlink is not a record:
+.B trash\-list
+prints nothing for it,
+.B rtrash list
+counts it as a name in
+.I info/
+that is not a trash record, and
+.B "status \-\-check"
+reports it as
+.BR stray: .
 It then counts only the records trash-cli would list, and no stray
 name, since trash-cli mentions none: an empty
 .BR Path= ,
@@ -1324,8 +1351,9 @@ payload is gone
 .RB ( dangling: ),
 a
 .I $I
-record that cannot be read, is larger than any record or cannot be
-parsed
+record that cannot be read, which is kept
+.RB ( "unreadable:" ),
+one that is larger than any record or cannot be parsed
 .RB ( "bad record:" ),
 a
 .I $R

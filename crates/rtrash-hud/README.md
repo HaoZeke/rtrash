@@ -29,5 +29,9 @@ or the Recycle Bin. On macOS, where Finder is the default, pass
 `--json` prints one object. The keys are `items`, `bytes`, and `roots`.
 Each root has `path`, `items`, `bytes`, `orphans`, and `dangling`. These
 are not the `rtrash status --json` names (`total_items`, `total_bytes`,
-and the `fs_*` fields). With no trash found, the two status lines go to
-stderr, as `rtrash status` writes them.
+and the `fs_*` fields). With no trash found, the text display writes
+those two lines to stderr, as `rtrash status` does. With `--json`, both
+write only their JSON object to stdout and leave stderr empty. This
+program prints `{"items":0,"bytes":0,"roots":[]}`. `rtrash status --json`
+prints its own object, with an empty `roots` array and `total_items` and
+`total_bytes` of 0.
