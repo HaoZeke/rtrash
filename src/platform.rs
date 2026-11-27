@@ -197,6 +197,9 @@ mod tests {
     fn home_trash_prefers_xdg_data_home() {
         let p = home_trash_from(Some(OsStr::new("/custom/xdg")), Some(OsStr::new("/home/u")));
         assert_eq!(p, PathBuf::from("/custom/xdg/Trash"));
+        // A set XDG_DATA_HOME is the root even when HOME is unset.
+        let alone = home_trash_from(Some(OsStr::new("/Users/alice/Library/xdg")), None);
+        assert_eq!(alone, PathBuf::from("/Users/alice/Library/xdg/Trash"));
     }
 
     #[test]
