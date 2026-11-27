@@ -5786,34 +5786,35 @@ mod tests {
     /// Two pins of one directory, reached by different paths, are one
     /// trash. A bind mount keeps the paths distinct after `resolve_parent`
     /// and still shares the device and inode `resolve_dirs` dedups on.
+    /// Linux only: `unshare` and `mount --bind` are not on macOS, where
+    /// this module still builds.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_bind_mounted_trash_is_pinned_once() {
-        if std::env::var_os("RTRASH_BIND_CHILD").is_some() {
-            bind_mounted_pins_collapse();
+        // `unshare -r` maps the caller to root in the child. A process
+        // that is already root mounts directly and must not unshare again.
+        if unsafe { libc::geteuid() } != 0 {
+            let exe = std::env::current_exe().expect("test binary");
+            let name = "trashdir::tests::a_bind_mounted_trash_is_pinned_once";
+            let out = std::process::Command::new("unshare")
+                .args(["-rm", "--"])
+                .arg(&exe)
+                .arg(name)
+                .args(["--exact", "--nocapture", "--test-threads=1"])
+                .output()
+                .expect("unshare");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success(),
+                "unshare bind child failed\n{stdout}{stderr}"
+            );
             return;
         }
-        let exe = std::env::current_exe().expect("test binary");
-        let name = "trashdir::tests::a_bind_mounted_trash_is_pinned_once";
-        let out = std::process::Command::new("unshare")
-            .args(["-rm", "--"])
-            .arg(&exe)
-            .arg(name)
-            .args(["--exact", "--nocapture", "--test-threads=1"])
-            .env("RTRASH_BIND_CHILD", "1")
-            .output()
-            .expect("unshare");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            out.status.success(),
-            "unshare bind child failed\n{stdout}{stderr}"
-        );
-        assert!(
-            stdout.contains("1 passed"),
-            "bind child did not run the check\n{stdout}{stderr}"
-        );
+        bind_mounted_pins_collapse();
     }
 
+    #[cfg(target_os = "linux")]
     fn bind_mounted_pins_collapse() {
         let root = std::env::temp_dir().join(format!("rtrash-bindpin-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -5890,13 +5891,105 @@ mod tests {
         assert!(directorysizes_parse_line(&line).is_none());
     }
 
-    /// The volume of a real path is an absolute prefix of it.
+    /// The volume of a real path is the mount that actually holds it.
+    /// `/` alone is that volume only when nothing deeper does.
     #[test]
     fn a_real_path_has_a_volume_top() {
         let path = std::env::temp_dir();
+        // macOS reaches temp through /var, a symlink to /private/var.
+        let path = fs::canonicalize(&path).unwrap_or(path);
         let top = volume_top_of_path(&path).expect("volume");
         assert!(top.is_absolute(), "{top:?}");
         assert!(path.starts_with(&top), "{path:?} {top:?}");
+        let expect = expected_volume_top(&path);
+        assert_eq!(Some(top.as_path()), expect.as_deref(), "{path:?}");
+        if expect.as_ref().is_some_and(|p| p != Path::new("/")) {
+            assert_ne!(
+                top.as_path(),
+                Path::new("/"),
+                "{path:?} is under {expect:?}"
+            );
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(deeper) = deeper_mount_probe() {
+            let got = volume_top_of_path(&deeper);
+            let expect = expected_volume_top(&deeper);
+            assert_eq!(got.as_deref(), expect.as_deref(), "{deeper:?}");
+            assert_ne!(
+                got.as_deref(),
+                Some(Path::new("/")),
+                "{deeper:?} is under {expect:?}"
+            );
+        }
+    }
+
+    /// What [`volume_top_of_path`] should report for `path`, from the
+    /// mount table when this build uses it, otherwise from the device walk.
+    fn expected_volume_top(path: &Path) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        if crate::platform::volume_trash_discovery() {
+            if let Ok(table) = read_mount_table() {
+                return top_from_rows(path, &mount_table(&table));
+            }
+        }
+        Some(device_top(path))
+    }
+
+    /// Deepest row of `rows` that contains `path`, or `/` when none does.
+    /// A pseudo file system there is not a volume.
+    #[cfg(target_os = "linux")]
+    fn top_from_rows(path: &Path, rows: &[(PathBuf, String)]) -> Option<PathBuf> {
+        let mut best: Option<&Path> = None;
+        for (mount, _) in rows {
+            if !path.starts_with(mount) {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(have) => {
+                    let n = mount.components().count();
+                    let h = have.components().count();
+                    n > h || (n == h && mount.as_os_str().len() > have.as_os_str().len())
+                }
+            };
+            if better {
+                best = Some(mount);
+            }
+        }
+        let top = best.unwrap_or(Path::new("/")).to_path_buf();
+        match rows.iter().find(|(mount, _)| *mount == top) {
+            Some((_, kind)) if is_pseudo_fs(kind) => None,
+            _ => Some(top),
+        }
+    }
+
+    /// Highest ancestor of `path` on the same device. Independent of the
+    /// mount table, which is what the non-Linux walk uses.
+    fn device_top(start: &Path) -> PathBuf {
+        use std::os::unix::fs::MetadataExt;
+        let dev = fs::symlink_metadata(start).unwrap().dev();
+        let mut cur = start.to_path_buf();
+        while let Some(parent) = cur.parent() {
+            match fs::symlink_metadata(parent) {
+                Ok(meta) if meta.dev() == dev => cur = parent.to_path_buf(),
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// A path under a real mount deeper than `/`, when the table has one.
+    #[cfg(target_os = "linux")]
+    fn deeper_mount_probe() -> Option<PathBuf> {
+        if !crate::platform::volume_trash_discovery() {
+            return None;
+        }
+        let table = read_mount_table().ok()?;
+        let rows = mount_table(&table);
+        let (mount, _) = rows
+            .iter()
+            .find(|(mount, kind)| mount != Path::new("/") && !is_pseudo_fs(kind))?;
+        Some(mount.join("rtrash-volume-top-probe"))
     }
 
     /// An empty directory this user cannot write is not wholly removable.
@@ -5908,10 +6001,8 @@ mod tests {
         let d = root.join("d");
         fs::create_dir_all(&d).unwrap();
         fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
-        let probe = d.join(".dac-probe");
-        let denied = fs::write(&probe, b"x").is_err();
-        let _ = fs::remove_file(&probe);
-        if !denied {
+        // False when the write succeeded: this process is not stopped by mode 0555.
+        if !crate::file_replace::writes_are_denied(&d) {
             eprintln!(
                 "an_empty_unwritable_directory_cannot_be_removed: mode 0555 does not deny writes \
                  (euid {}); skipping the DAC check",

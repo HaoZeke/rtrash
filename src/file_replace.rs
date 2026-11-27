@@ -121,6 +121,9 @@ pub(crate) fn temp_beside(path: &Path) -> PathBuf {
     dir.join(format!(".{name}.{}.tmp", std::process::id()))
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use tests::writes_are_denied;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +142,19 @@ mod tests {
             .collect();
         out.sort();
         out
+    }
+
+    /// True when creating a file in `dir` fails.
+    ///
+    /// A mode `0555` directory still accepts that write for root and for
+    /// `CAP_DAC_OVERRIDE`. A test of the denial skips when this is false:
+    /// the write succeeded, so there is no `PermissionDenied` to see.
+    #[cfg(unix)]
+    pub(crate) fn writes_are_denied(dir: &Path) -> bool {
+        let probe = dir.join(".dac-probe");
+        let denied = fs::write(&probe, b"x").is_err();
+        let _ = fs::remove_file(&probe);
+        denied
     }
 
     /// Both writers put the whole body in place and leave no temporary,
@@ -220,10 +236,8 @@ mod tests {
         let mut mode = fs::metadata(&sub).unwrap().permissions();
         mode.set_mode(0o555);
         fs::set_permissions(&sub, mode).unwrap();
-        let probe = sub.join(".dac-probe");
-        let denied = fs::write(&probe, b"x").is_err();
-        let _ = fs::remove_file(&probe);
-        if !denied {
+        // False when the write succeeded: this process is not stopped by mode 0555.
+        if !writes_are_denied(&sub) {
             eprintln!(
                 "a_write_into_a_read_only_directory_is_permission_denied: mode 0555 does not deny \
                  writes (euid {}); skipping the DAC check",

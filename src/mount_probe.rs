@@ -61,11 +61,24 @@ pub fn wait() -> Duration {
 /// of the deepest mount point above it; empty when unknown.
 pub fn fs_type_of(path: &Path) -> String {
     static TABLE: std::sync::OnceLock<Vec<(PathBuf, String)>> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        crate::trashdir::read_mount_table()
-            .map(|t| crate::trashdir::mount_table(&t))
-            .unwrap_or_default()
-    });
+    // A test pins the table on this thread. The lookup below is the one
+    // both that pin and the host table go through.
+    let fixture = fixture_text().map(|text| crate::trashdir::mount_table(&text));
+    let table = if let Some(ref rows) = fixture {
+        rows
+    } else {
+        TABLE.get_or_init(|| {
+            crate::trashdir::read_mount_table()
+                .map(|t| crate::trashdir::mount_table(&t))
+                .unwrap_or_default()
+        })
+    };
+    type_from_mounts(path, table)
+}
+
+/// The type `table` gives `path`: the deepest mount point above it, or
+/// empty when that point is not one of the rows.
+fn type_from_mounts(path: &Path, table: &[(PathBuf, String)]) -> String {
     let points: Vec<PathBuf> = table.iter().map(|(m, _)| m.clone()).collect();
     let top = crate::trashdir::longest_mount_prefix(path, &points);
     table
@@ -73,6 +86,25 @@ pub fn fs_type_of(path: &Path) -> String {
         .find(|(m, _)| *m == top)
         .map(|(_, t)| t.clone())
         .unwrap_or_default()
+}
+
+/// Mount-table text a test installs for this thread. Production reads
+/// the host table; there is nothing to pin.
+fn fixture_text() -> Option<String> {
+    #[cfg(test)]
+    {
+        TABLE_FIXTURE.with(|slot| slot.borrow().clone())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TABLE_FIXTURE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// [`probe_typed`] with the type the mount table gives `path`.
@@ -212,5 +244,34 @@ dev /mnt/other nfs4 rw 0 0
             Some(dir.clone())
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `fs_type_of` reads the type off the mount table. A stand-in answer
+    /// such as `xyzzy`, or the type of a different row, is not that type.
+    /// The table is the fixture on this thread, not the host's mounts.
+    #[test]
+    fn fs_type_of_reads_the_mounted_type() {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                super::TABLE_FIXTURE.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _clear = Clear;
+        super::TABLE_FIXTURE.with(|slot| {
+            *slot.borrow_mut() = Some(
+                "\
+dev /mnt/data ext4 rw 0 0
+dev /mnt/data/vol xfs rw 0 0
+dev /mnt/other nfs4 rw 0 0
+"
+                .to_string(),
+            );
+        });
+        assert_eq!(fs_type_of(Path::new("/mnt/data/vol/file")), "xfs");
+        assert_eq!(fs_type_of(Path::new("/mnt/data/file")), "ext4");
+        assert_eq!(fs_type_of(Path::new("/mnt/other/file")), "nfs4");
+        // Nothing in the fixture covers this path, so the type is empty.
+        assert_eq!(fs_type_of(Path::new("/somewhere/else")), "");
     }
 }

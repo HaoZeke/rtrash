@@ -565,6 +565,8 @@ mod tests {
     #[test]
     fn a_missing_tail_keeps_the_resolved_prefix_once() {
         let dir = scratch("prefix");
+        // Resolved up front: macOS reaches temp_dir through /var.
+        let dir = std::fs::canonicalize(&dir).unwrap();
         let missing = dir.join("real").join("gone");
         let got = resolve_parent(&missing);
         let expect = crate::util::plain_path(&dir.join("real")).join("gone");
@@ -572,14 +574,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `expand` keeps a real path. An empty result would select nothing.
+    /// `expand` keeps a real path, the same one `norm` records for it.
+    /// An empty result would select nothing. The whole path has to match:
+    /// on Windows `norm` folds case and writes `\`, so a `/n` suffix does not.
     #[test]
     fn expand_keeps_a_real_path() {
         let dir = scratch("expand");
         let file = dir.join("real").join("n");
         std::fs::write(&file, b"x").unwrap();
         let got = expand(&[file.display().to_string()]);
-        assert!(got.iter().any(|g| g.ends_with("/n")), "{got:?}");
+        let expect = norm(&resolve_parent(&file));
+        assert!(got.contains(&expect), "{got:?} {expect}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
