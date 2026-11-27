@@ -32,6 +32,13 @@
 //! round 267 went red when a parallel test's put rewrote the shared
 //! last-put record between another test's put and its `empty`.
 //!
+//! Every test that runs rtrash pins the catalog too. `rtrash` sets
+//! `XDG_CACHE_HOME` to `home/.cache`, and `rtrash_real` sets it to a
+//! scratch directory: the catalog is not the trash. An integration test
+//! links the library without `cfg(test)`, so the cache is on. On Unix
+//! each test binary snapshots the real cache and key directories at
+//! startup and fails at exit if they changed.
+//!
 //! Every test that compares two `du --json` outputs compares them through
 //! `du_scan`, which cuts off the live trash summary: it counts the trash
 //! as it is at that moment, not the scan.
@@ -56,7 +63,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+mod catalog_guard;
+
+#[cfg(unix)]
+pub use catalog_guard::install as install_catalog_guard;
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub use catalog_guard::{catalog_dir_listing, real_catalog_dirs};
+#[cfg(not(unix))]
+pub fn install_catalog_guard() {}
 
 /// A fresh, empty directory under the system temp dir, named
 /// `rtrash-{prefix}-{pid}-{n}-{tag}`, unique to this call.
@@ -307,8 +326,10 @@ pub fn du_row(text: &str, name: &str) -> String {
 /// du trash summary use that folder, not the system Recycle Bin),
 /// `LOCALAPPDATA` is [`local_app_data`]`(home)` on Windows, and the
 /// guard and config variables are cleared. Set anything else on the
-/// result; a later `.env` wins.
+/// result; a later `.env` wins. `XDG_CACHE_HOME` is `home/.cache`, so the
+/// sealed catalog and its key stay under `home` with the trash.
 pub fn rtrash(home: &Path) -> Command {
+    install_catalog_guard();
     let mut c = Command::new(bin());
     if cfg!(windows) {
         c.env("LOCALAPPDATA", local_app_data(home));
@@ -316,6 +337,7 @@ pub fn rtrash(home: &Path) -> Command {
     c.env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_DATA_HOME", home.join("xdg"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("RTRASH_MACOS_TRASH", "freedesktop")
         .env("RTRASH_TEST_BIN_DIR", test_bin(home))
@@ -401,9 +423,22 @@ pub enum Real {
 
 /// rtrash with the caller's environment, for a test that must reach the
 /// real trash or must see the environment as is; `why` names the reason.
+/// `XDG_CACHE_HOME` is still a scratch directory. The catalog is not the
+/// trash, and the suite must leave the real cache untouched. A later
+/// `.env` wins.
 pub fn rtrash_real(why: Real) -> Command {
     let _ = why;
-    Command::new(bin())
+    install_catalog_guard();
+    let mut c = Command::new(bin());
+    c.env("XDG_CACHE_HOME", real_run_cache());
+    c
+}
+
+/// One scratch `XDG_CACHE_HOME` for [`rtrash_real`] in this process.
+fn real_run_cache() -> PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| scratch_dir("catalog", "real-run"))
+        .clone()
 }
 
 /// How long [`Asking`] waits for a question, or for the run to end after

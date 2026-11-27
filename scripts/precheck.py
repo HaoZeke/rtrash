@@ -3716,6 +3716,14 @@ def check_bin_seam():
     if '.env("RTRASH_TEST_BIN_DIR"' not in fn_body(rust_code(common, strings=True), "rtrash"):
         errors.append("tests/common/mod.rs: rtrash(home) does not set RTRASH_TEST_BIN_DIR; "
                       "Windows runs would reach the system Recycle Bin")
+    body = rust_code(common, strings=True)
+    if '.env("XDG_CACHE_HOME"' not in fn_body(body, "rtrash"):
+        errors.append("tests/common/mod.rs: rtrash(home) does not set XDG_CACHE_HOME; "
+                      "an integration test links the library without cfg(test), so the "
+                      "catalog is on and would write the real cache")
+    if '.env("XDG_CACHE_HOME"' not in fn_body(body, "rtrash_real"):
+        errors.append("tests/common/mod.rs: rtrash_real does not set XDG_CACHE_HOME; "
+                      "a run with the caller's home would write the real cache")
     for path in sorted((ROOT / "tests").rglob("*.rs")):
         text = rust_code(path.read_text(encoding="utf-8"), strings=True)
         for m in re.finditer(r'env_remove\(\s*"RTRASH_TEST_BIN_DIR"', text):

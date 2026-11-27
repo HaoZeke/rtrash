@@ -4,6 +4,10 @@
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(unix)]
+#[path = "common/catalog_guard.rs"]
+mod catalog_guard;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -741,6 +745,7 @@ fn package_release_script_stages_fish_multicall() {
 #[cfg(unix)]
 #[test]
 fn interop_smoke_script_passes_with_the_tools_present() {
+    catalog_guard::install();
     // CI installs trash-cli, gtrash and gio and runs them. This test sets
     // RTRASH_INTEROP_NO_GIO=1 to leave gio out. The run pairs rtrash with
     // itself and with each of trash-cli and gtrash on PATH.

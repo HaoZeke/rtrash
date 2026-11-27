@@ -74,8 +74,10 @@ pub(crate) fn enabled() -> bool {
     if no_cache() {
         return false;
     }
-    // Library tests share a process. They opt in by pointing the cache at
-    // a directory of their own; every other test keeps scanning.
+    // Unit tests compile with cfg(test) and share a process, so the cache
+    // stays off unless the test points it at its own directory. Integration
+    // tests link this crate without cfg(test), so the cache is on; they pin
+    // XDG_CACHE_HOME and XDG_DATA_HOME to a temp directory.
     #[cfg(test)]
     {
         override_dirs().is_some()

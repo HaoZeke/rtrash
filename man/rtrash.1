@@ -773,7 +773,9 @@ itself or the whole trash; no command lists it or acts on it, and a full
 .B empty
 clears it.
 .PP
-List reuses a sealed catalog of the records
+List, status, undo, trash-stats, retention and the Python
+.B list_trash
+binding reuse a sealed catalog of the records
 (see
 .I $XDG_CACHE_HOME/rtrash
 under
@@ -1079,6 +1081,7 @@ An age filter leaves them out.
 Summarize discovered trash: item count and approximate reclaimable size
 (per root and total). Uses the same disk-usage walk as
 .BR "empty \-\-dry\-run" .
+It reads the sealed catalog when the records still match.
 A line for each trash then gives the free bytes and free inodes of its
 file system, and a warning goes to stderr when either is under 10%.
 The JSON roots carry them as
@@ -1355,6 +1358,7 @@ Sizes come from the same walk and
 .I directorysizes
 cache as
 .BR status .
+It reads the sealed catalog when the records still match.
 On Windows there is one summary per drive's Recycle Bin
 .RI ( X:\e$Recycle.Bin ),
 an item's size is the one its
@@ -3318,6 +3322,7 @@ Output version information and exit.
 [\fIOPTION\fR]... [\fIBATCH\fR]
 .PP
 Restore every item one put run trashed, each to its original location.
+It reads the sealed catalog when the records still match.
 Each put run writes one batch id into its
 .B .trashinfo
 files, under the extra key
@@ -4870,7 +4875,9 @@ The key bindings file to read instead of
 .B true
 or
 .BR yes ,
-any case): list, rm, restore and empty read every
+any case): list, status, undo, trash-stats, retention, the Python
+.B list_trash
+binding, rm, restore and empty read every
 .I .trashinfo
 instead of the sealed catalog under
 .IR $XDG_CACHE_HOME/rtrash .
@@ -5232,7 +5239,10 @@ and
 write walked sizes back.
 .TP
 .I $XDG_CACHE_HOME/rtrash/c\-*.bin
-Sealed catalog of one trash's records. A later list reuses it when
+Sealed catalog of one trash's records. List, status, undo,
+trash-stats, retention and the Python
+.B list_trash
+binding reuse it when
 the records still match and their modification times are older than
 the catalog by more than the coarse clock's tick.
 The key is

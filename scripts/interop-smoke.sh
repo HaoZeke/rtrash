@@ -19,8 +19,8 @@
 # Tools that are missing get skipped with a note; rtrash must be there.
 # gio needs a session bus and gvfsd, so the script starts both in
 # dbus-run-session when gio is on PATH and no gvfsd runs yet.
-# Everything happens in a scratch XDG_DATA_HOME, so the real trash stays
-# untouched. RTRASH_INTEROP_NO_GIO=1 leaves gio out. Without that opt-out,
+# Everything happens in a scratch XDG_DATA_HOME and XDG_CACHE_HOME, so
+# the real trash and the real catalog stay untouched. RTRASH_INTEROP_NO_GIO=1 leaves gio out. Without that opt-out,
 # gio on PATH with gvfsd is part of the run, and a probe that cannot
 # restore fails the run.
 # Exits non-zero when the gio probe or any pairing fails.
@@ -41,7 +41,8 @@ if [[ -z ${RTRASH_INTEROP_SCRATCH:-} ]]; then
 fi
 scratch=$RTRASH_INTEROP_SCRATCH
 export XDG_DATA_HOME=$scratch/data
-mkdir -p "$XDG_DATA_HOME" "$scratch/w"
+export XDG_CACHE_HOME=$scratch/cache
+mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$scratch/w"
 
 if [[ -z ${RTRASH_INTEROP_NO_GIO:-} ]] && command -v gio >/dev/null && [[ -x $GVFSD && -z ${RTRASH_INTEROP_BUS:-} ]]; then
   export RTRASH_INTEROP_BUS=1
@@ -624,5 +625,5 @@ if [[ $left -ne 0 ]]; then
   fail=1
 fi
 cd /
-env -u XDG_DATA_HOME "$rtrash" put -r "$scratch" >/dev/null 2>&1 || true
+rm -rf -- "$scratch"
 exit $fail

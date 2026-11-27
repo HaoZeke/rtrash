@@ -560,3 +560,51 @@ fn no_cache_ignores_an_existing_catalog() {
     assert!(zero.status.success(), "{}", stderr(&zero));
     assert_eq!(log_lines(&sb.log()), ["hit"], "0 leaves the catalog on");
 }
+
+#[test]
+fn the_suite_pins_the_catalog_away_from_the_real_home() {
+    let home = common::scratch_dir("catalog", "pin-env");
+    let pinned = common::rtrash(&home);
+    let cache = env_path(&pinned, "XDG_CACHE_HOME");
+    let data = env_path(&pinned, "XDG_DATA_HOME");
+    assert!(cache.starts_with(&home), "{}", cache.display());
+    assert!(data.starts_with(&home), "{}", data.display());
+
+    let real = common::rtrash_real(common::Real::NoTrash);
+    let cache = env_path(&real, "XDG_CACHE_HOME");
+    let user = PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_ne!(cache, user.join(".cache"), "{}", cache.display());
+    assert!(
+        cache.starts_with(std::env::temp_dir()),
+        "{}",
+        cache.display()
+    );
+
+    let watched = common::real_catalog_dirs();
+    assert!(watched.contains(&user.join(".cache/rtrash")), "{watched:?}");
+    assert!(
+        watched.contains(&user.join(".local/share/rtrash")),
+        "{watched:?}"
+    );
+}
+
+#[test]
+fn a_catalog_dir_listing_changes_when_its_file_does() {
+    let dir = common::scratch_dir("catalog", "listing").join("gone");
+    assert_eq!(common::catalog_dir_listing(&dir), "missing\n");
+    fs::create_dir_all(&dir).unwrap();
+    let empty = common::catalog_dir_listing(&dir);
+    assert_ne!(empty, "missing\n");
+    fs::write(dir.join("c.bin"), b"abc").unwrap();
+    let filled = common::catalog_dir_listing(&dir);
+    assert_ne!(filled, empty);
+    fs::write(dir.join("c.bin"), b"abcd").unwrap();
+    assert_ne!(common::catalog_dir_listing(&dir), filled);
+}
+
+fn env_path(cmd: &std::process::Command, key: &str) -> PathBuf {
+    cmd.get_envs()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, v)| v.map(PathBuf::from))
+        .unwrap_or_else(|| panic!("{key} unset"))
+}

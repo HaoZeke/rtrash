@@ -7,12 +7,18 @@
 
 mod common;
 
+use std::cell::Cell;
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
-/// Serialise tests that mutate process env (put_one reads XDG_DATA_HOME).
+/// Serialise tests that mutate process env (put and the catalog read it).
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    static CATALOG_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
 
 use rtrash::empty_tui;
 use rtrash::list;
@@ -67,12 +73,82 @@ impl TrashSandbox {
         );
     }
 
+    /// `HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` for this sandbox.
+    /// In-process `list::collect` uses the test process, and `cfg(test)`
+    /// is not set on the library it links, so an unpinned call writes the
+    /// real cache and key. A nested call keeps the outer pin.
+    fn catalog_env(&self) -> CatalogEnv {
+        common::install_catalog_guard();
+        if CATALOG_DEPTH.with(|d| d.get()) > 0 {
+            CATALOG_DEPTH.with(|d| d.set(d.get() + 1));
+            return CatalogEnv {
+                lock: None,
+                home: None,
+                data: None,
+                cache: None,
+                outer: false,
+            };
+        }
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::var_os("HOME");
+        let data = std::env::var_os("XDG_DATA_HOME");
+        let cache = std::env::var_os("XDG_CACHE_HOME");
+        // SAFETY: ENV_LOCK serializes these writes, and Drop puts them back.
+        unsafe {
+            std::env::set_var("HOME", &self.root);
+            std::env::set_var("XDG_DATA_HOME", self.root.join("xdg"));
+            std::env::set_var("XDG_CACHE_HOME", self.root.join(".cache"));
+        }
+        CATALOG_DEPTH.with(|d| d.set(1));
+        CatalogEnv {
+            lock: Some(lock),
+            home,
+            data,
+            cache,
+            outer: true,
+        }
+    }
+
     fn collect_entries(&self) -> Vec<list::Entry> {
+        let _env = self.catalog_env();
         let dir = trashdir::TrashDir {
             root: self.trash(),
             topdir: None,
         };
         list::collect(std::slice::from_ref(&dir))
+    }
+}
+
+struct CatalogEnv {
+    lock: Option<MutexGuard<'static, ()>>,
+    home: Option<OsString>,
+    data: Option<OsString>,
+    cache: Option<OsString>,
+    outer: bool,
+}
+
+impl Drop for CatalogEnv {
+    fn drop(&mut self) {
+        if !self.outer {
+            CATALOG_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+            return;
+        }
+        restore_var("HOME", self.home.take());
+        restore_var("XDG_DATA_HOME", self.data.take());
+        restore_var("XDG_CACHE_HOME", self.cache.take());
+        CATALOG_DEPTH.with(|d| d.set(0));
+        // Keep the lock until the variables are back, then release it.
+        drop(self.lock.take());
+    }
+}
+
+fn restore_var(key: &str, val: Option<OsString>) {
+    // SAFETY: the outer guard still holds ENV_LOCK.
+    unsafe {
+        match val {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 }
 
@@ -85,6 +161,7 @@ impl Drop for TrashSandbox {
 #[test]
 fn restore_selection_restores_two_of_three() {
     let sb = TrashSandbox::new("restore-2of3");
+    let _env = sb.catalog_env();
     sb.put(&["a.txt", "b.txt", "c.txt"]);
     assert!(!sb.work().join("a.txt").exists());
     assert!(!sb.work().join("b.txt").exists());
@@ -138,6 +215,7 @@ fn restore_selection_restores_two_of_three() {
 #[test]
 fn restore_selection_returns_outcome_lines() {
     let sb = TrashSandbox::new("restore-log");
+    let _env = sb.catalog_env();
     sb.put(&["ok.txt", "busy.txt"]);
     fs::write(sb.work().join("busy.txt"), "blocker").unwrap();
     let entries = sb.collect_entries();
@@ -167,6 +245,7 @@ fn restore_selection_returns_outcome_lines() {
 #[test]
 fn permanently_remove_entries_subset_leaves_others() {
     let sb = TrashSandbox::new("empty-subset");
+    let _env = sb.catalog_env();
     sb.put(&["keep.txt", "drop1.txt", "drop2.txt"]);
     let entries = sb.collect_entries();
     assert_eq!(entries.len(), 3);
@@ -206,8 +285,8 @@ fn permanently_remove_entries_subset_leaves_others() {
 
 #[test]
 fn permanently_remove_entries_keeps_paths_in_the_keep_file() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let sb = TrashSandbox::new("empty-keep");
+    let _env = sb.catalog_env();
     sb.put(&["kept.txt", "drop.txt"]);
     let kept = sb.work().join("kept.txt");
     fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
@@ -216,13 +295,10 @@ fn permanently_remove_entries_keeps_paths_in_the_keep_file() {
         format!("{}\n", kept.display()),
     )
     .unwrap();
-    let old_home = std::env::var_os("HOME");
     let old_config = std::env::var_os("XDG_CONFIG_HOME");
     let old_override = std::env::var_os("RTRASH_CONFIG");
-    // SAFETY: process environment changes are serialized by ENV_LOCK and
-    // restored before the test returns.
+    // SAFETY: catalog_env holds ENV_LOCK, and these are restored below.
     unsafe {
-        std::env::set_var("HOME", &sb.root);
         std::env::set_var("XDG_CONFIG_HOME", sb.root.join(".config"));
         std::env::remove_var("RTRASH_CONFIG");
     }
@@ -230,10 +306,6 @@ fn permanently_remove_entries_keeps_paths_in_the_keep_file() {
     let refs: Vec<&list::Entry> = entries.iter().collect();
     let result = empty_tui::permanently_remove_entries("rtrash", &refs, false);
     unsafe {
-        match old_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
         match old_config {
             Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
@@ -259,32 +331,15 @@ fn permanently_remove_entries_keeps_paths_in_the_keep_file() {
 
 #[test]
 fn put_selection_trashes_two_paths() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let sb = TrashSandbox::new("put-sel");
+    let _env = sb.catalog_env();
     let p1 = sb.work().join("p1.txt");
     let p2 = sb.work().join("p2.txt");
     fs::write(&p1, b"1").unwrap();
     fs::write(&p2, b"2").unwrap();
 
-    // put_one / trashdir::select read process env (not the CLI Command sandbox).
-    let prev_xdg = std::env::var_os("XDG_DATA_HOME");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: single-threaded under ENV_LOCK; restored below.
-    unsafe {
-        std::env::set_var("XDG_DATA_HOME", sb.root.join("xdg"));
-        std::env::set_var("HOME", &sb.root);
-    }
+    // put_one reads the process env, which catalog_env pointed at this sandbox.
     let code = put_tui::put_selection("rtrash", &[p1.clone(), p2.clone()], false, true, false);
-    unsafe {
-        match prev_xdg {
-            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
     assert_eq!(code, 0, "put_selection exit");
     assert!(!p1.exists() && !p2.exists());
     let left = sb.collect_entries();

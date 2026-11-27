@@ -330,7 +330,7 @@ Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list`
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
 Orphans (payloads in `files/` with no `.trashinfo`) come last, with a `????-??-??` date and their path inside the trash.
 In JSON they carry `"orphan": true`; an age filter leaves them out.
-List reuses a sealed catalog of the records under `$XDG_CACHE_HOME/rtrash` (key `$XDG_DATA_HOME/rtrash/cache.key`, mode 0600) when those records still match it. Put, restore, rm and empty remove that catalog. A change another tool makes does not: the catalog is ignored and the next list reads the records. Empty, a size budget and the check before an unscoped empty read each record again before they delete. `RTRASH_NO_CACHE` set to `1`, `true` or `yes`, in any case, reads every record. Any other value leaves the catalog on.
+List, status, undo, trash-stats, retention and the Python `list_trash` binding reuse a sealed catalog of the records under `$XDG_CACHE_HOME/rtrash` (key `$XDG_DATA_HOME/rtrash/cache.key`, mode 0600) when those records still match it. Put, restore, rm and empty remove that catalog. A change another tool makes does not: the catalog is ignored and the records are read. Empty, a size budget and the check before an unscoped empty read each record again before they delete. `RTRASH_NO_CACHE` set to `1`, `true` or `yes`, in any case, reads every record. Any other value leaves the catalog on.
 
 | Flag | Meaning |
 |------|---------|
@@ -566,7 +566,7 @@ Full empty was optimized for large trashcans: no pre-scan when not verbose, `d_t
 Emptying uses an in-process bulk tree delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`, not a shell-out to rsync).
 The walk keeps its own stack and at most 16 open directories, so trees of any depth go.
 On btrfs, if a trash payload is a real subvolume root, empty uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.
-An unchanged trash is listed from a sealed catalog of its records once they are older than the coarse clock's tick. A change, including one that keeps the file's timestamps, is read again.
+List, status, undo, trash-stats, retention and the Python `list_trash` binding read an unchanged trash from a sealed catalog of its records once they are older than the coarse clock's tick. A change, including one that keeps the file's timestamps, is read again.
 
 ## Development
 
@@ -574,7 +574,7 @@ An unchanged trash is listed from a sealed catalog of its records once they are 
 $ cargo test
 ```
 
-Integration tests isolate trash under a temporary `XDG_DATA_HOME` and pin `empty` / list / restore / `rm` with `--trash-dir=…` so they never clear the host trash.
+Integration tests isolate trash under a temporary `XDG_DATA_HOME`, the catalog under a temporary `XDG_CACHE_HOME`, and pin `empty` / list / restore / `rm` with `--trash-dir=…` so they never clear the host trash.
 
 ## Citation
 
