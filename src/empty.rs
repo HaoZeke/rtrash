@@ -1557,12 +1557,37 @@ mod tests {
         fs::set_permissions(&info, mode).unwrap();
     }
 
+    /// True when creating a file in `dir` fails. Root, and anyone with
+    /// CAP_DAC_OVERRIDE, can still write a mode `0555` directory.
+    fn writes_are_denied(dir: &std::path::Path) -> bool {
+        let probe = dir.join(".dac-probe");
+        let denied = fs::write(&probe, b"x").is_err();
+        let _ = fs::remove_file(&probe);
+        denied
+    }
+
+    fn skip_without_dac(test: &str, root: &std::path::Path) -> bool {
+        if writes_are_denied(&root.join("info")) {
+            return false;
+        }
+        eprintln!(
+            "{test}: mode 0555 does not deny writes (euid {}); skipping the DAC check",
+            unsafe { libc::geteuid() }
+        );
+        true
+    }
+
     /// The payload can go and the record cannot. That is a failed empty:
     /// the record stays, and the run is not a success.
     #[test]
     fn an_unwritable_record_dir_fails_an_age_empty() {
         let root = old_trash("info-ro", &["a"]);
         lock_info(&root);
+        if skip_without_dac("an_unwritable_record_dir_fails_an_age_empty", &root) {
+            unlock_info(&root);
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
         let argv = vec![
             "--plain".to_string(),
             format!("--trash-dir={}", root.display()),
@@ -1582,6 +1607,11 @@ mod tests {
     fn an_unwritable_record_dir_fails_an_exact_empty() {
         let root = old_trash("exact-ro", &["a"]);
         lock_info(&root);
+        if skip_without_dac("an_unwritable_record_dir_fails_an_exact_empty", &root) {
+            unlock_info(&root);
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
         let argv = vec![
             "--plain".to_string(),
             format!("--trash-dir={}", root.display()),

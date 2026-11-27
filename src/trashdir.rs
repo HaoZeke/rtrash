@@ -5783,14 +5783,71 @@ mod tests {
         out
     }
 
-    /// The same directory is one trash, however many times it is named.
+    /// Two pins of one directory, reached by different paths, are one
+    /// trash. A bind mount keeps the paths distinct after `resolve_parent`
+    /// and still shares the device and inode `resolve_dirs` dedups on.
     #[test]
-    fn a_trash_root_counts_once() {
-        let (root, td) = put_trash("rootset");
-        let mut seen = RootSet::default();
-        assert!(seen.first(&td.root));
-        assert!(!seen.first(&td.root));
+    fn a_bind_mounted_trash_is_pinned_once() {
+        if std::env::var_os("RTRASH_BIND_CHILD").is_some() {
+            bind_mounted_pins_collapse();
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary");
+        let name = "trashdir::tests::a_bind_mounted_trash_is_pinned_once";
+        let out = std::process::Command::new("unshare")
+            .args(["-rm", "--"])
+            .arg(&exe)
+            .arg(name)
+            .args(["--exact", "--nocapture", "--test-threads=1"])
+            .env("RTRASH_BIND_CHILD", "1")
+            .output()
+            .expect("unshare");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "unshare bind child failed\n{stdout}{stderr}"
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "bind child did not run the check\n{stdout}{stderr}"
+        );
+    }
+
+    fn bind_mounted_pins_collapse() {
+        let root = std::env::temp_dir().join(format!("rtrash-bindpin-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
+        let real = root.join("real");
+        let bind = root.join("bind");
+        fs::create_dir_all(real.join("Trash/files")).unwrap();
+        fs::create_dir_all(real.join("Trash/info")).unwrap();
+        fs::create_dir_all(&bind).unwrap();
+        let mounted = std::process::Command::new("mount")
+            .arg("--bind")
+            .arg(&real)
+            .arg(&bind)
+            .status()
+            .expect("mount");
+        assert!(mounted.success(), "mount --bind");
+        struct Unmount(PathBuf, PathBuf);
+        impl Drop for Unmount {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("umount").arg(&self.0).status();
+                let _ = fs::remove_dir_all(&self.1);
+            }
+        }
+        let _guard = Unmount(bind.clone(), root.clone());
+        let a = fs::canonicalize(real.join("Trash")).unwrap();
+        let b = fs::canonicalize(bind.join("Trash")).unwrap();
+        assert_ne!(a, b);
+        let id = |p: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            let m = fs::metadata(p).unwrap();
+            (m.dev(), m.ino())
+        };
+        assert_eq!(id(&a), id(&b));
+        assert_eq!(resolve_dirs(&[a.clone(), b.clone()]).len(), 1);
+        assert_eq!(resolve_dirs(&[b, a]).len(), 1);
     }
 
     /// A temporary a crashed put left is not the file the next put writes.
@@ -5851,8 +5908,16 @@ mod tests {
         let d = root.join("d");
         fs::create_dir_all(&d).unwrap();
         fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
-        // Root may write anywhere, so only an ordinary user sees the refusal.
-        if unsafe { libc::geteuid() } != 0 {
+        let probe = d.join(".dac-probe");
+        let denied = fs::write(&probe, b"x").is_err();
+        let _ = fs::remove_file(&probe);
+        if !denied {
+            eprintln!(
+                "an_empty_unwritable_directory_cannot_be_removed: mode 0555 does not deny writes \
+                 (euid {}); skipping the DAC check",
+                unsafe { libc::geteuid() }
+            );
+        } else {
             let err = tree_removable(&d, &fs::symlink_metadata(&d).unwrap()).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         }

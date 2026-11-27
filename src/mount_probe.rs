@@ -185,22 +185,32 @@ mod tests {
         assert!(start.elapsed() < wait() + Duration::from_secs(30));
     }
 
-    /// The type is the mount table's type for the longest prefix, and a
-    /// look at a local path returns what the closure produced.
+    /// A fixture table, not the host's: the deepest mount wins, and a
+    /// local look at a scratch directory returns what the closure built.
     #[test]
-    fn the_root_type_comes_from_the_mount_table() {
-        let path = Path::new("/");
-        let table = crate::trashdir::read_mount_table().expect("mount table");
-        let mounts = crate::trashdir::mount_table(&table);
+    fn a_fixture_mount_table_names_the_deeper_type() {
+        let table = "\
+dev /mnt/data ext4 rw 0 0
+dev /mnt/data/vol ext4 rw 0 0
+dev /mnt/other nfs4 rw 0 0
+";
+        let mounts = crate::trashdir::mount_table(table);
         let points: Vec<PathBuf> = mounts.iter().map(|(m, _)| m.clone()).collect();
+        let path = Path::new("/mnt/data/vol/file");
         let top = crate::trashdir::longest_mount_prefix(path, &points);
-        let expect = mounts
+        assert_eq!(top, Path::new("/mnt/data/vol"));
+        let kind = mounts
             .iter()
             .find(|(m, _)| *m == top)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
-        assert!(!expect.is_empty(), "{expect:?}");
-        assert_eq!(fs_type_of(path), expect);
-        assert_eq!(probe(path, |p| p.to_path_buf()), Some(PathBuf::from("/")));
+            .map(|(_, t)| t.as_str());
+        assert_eq!(kind, Some("ext4"));
+        let dir = std::env::temp_dir().join(format!("rtrash-mnt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            probe_typed(&dir, kind.unwrap(), |p| p.to_path_buf()),
+            Some(dir.clone())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

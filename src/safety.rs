@@ -204,16 +204,23 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// A scratch directory is not home. Unset or empty HOME does not panic
+    /// and does not make that directory home. When HOME names a directory,
+    /// that directory is home: `is_home` caches the process value and there
+    /// is no seam to point it at the scratch directory.
     #[test]
-    fn the_resolved_home_directory_is_home() {
-        let raw = std::env::var_os("HOME")
-            .filter(|h| !h.is_empty())
-            .expect("HOME");
-        let home = fs::canonicalize(&raw).unwrap_or_else(|_| PathBuf::from(&raw));
-        assert!(is_home(&home));
-        let other = std::env::temp_dir();
-        if other != home {
-            assert!(!is_home(&other));
+    fn a_scratch_directory_is_not_home() {
+        let dir = std::env::temp_dir().join(format!("rtrash-not-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap_or(dir);
+        assert!(!is_home(&dir));
+        if let Some(raw) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            let home = fs::canonicalize(&raw).unwrap_or_else(|_| PathBuf::from(&raw));
+            if home != dir {
+                assert!(is_home(&home));
+            }
         }
+        let _ = fs::remove_dir_all(&dir);
     }
 }
