@@ -7202,10 +7202,10 @@ mod tests {
         match &problems[0] {
             BinProblem::Unreached { record: got, why } => {
                 assert_eq!(got, &record);
-                assert!(
-                    why.contains("Input/output error") || why.contains("EIO"),
-                    "{why}"
-                );
+                // The seam's text, not an OS strerror. glibc says
+                // "Input/output error", musl says "I/O error (os error 5)",
+                // and Windows uses 5 for access denied.
+                assert_eq!(why, "rtrash test: stat failed", "{why}");
             }
             other => panic!("expected an unreached payload, got {other:?}"),
         }
@@ -7213,6 +7213,7 @@ mod tests {
         assert!(line.starts_with("unreadable:"), "{line}");
         assert!(line.contains("kept"), "{line}");
         assert!(line.contains("payload"), "{line}");
+        assert!(line.contains("rtrash test: stat failed"), "{line}");
         assert!(problems[0].fix_target().is_none());
         let _ = check_bins("t", std::slice::from_ref(&dir), true, false);
         assert!(record.exists(), "an unreachable payload is not dangling");

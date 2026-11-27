@@ -995,12 +995,13 @@ pub enum Look {
 /// dangling. The precheck refuses `metadata(..).is_err()` and a
 /// `metadata(..).is_ok()` presence test elsewhere.
 pub fn look(path: &std::path::Path) -> Look {
-    // Debug-only: one path stats as EIO, so a test can put an unreachable
-    // name beside one that stats normally.
+    // Debug-only: one path is unreachable, so a test can put that name
+    // beside one that stats normally. The message is fixed. glibc, musl
+    // and Windows do not agree on what raw os error 5 says.
     if cfg!(debug_assertions)
         && std::env::var_os("RTRASH_TEST_LOOK_IO").as_deref() == Some(path.as_os_str())
     {
-        return Look::Unreachable(io::Error::from_raw_os_error(libc::EIO));
+        return Look::Unreachable(io::Error::other("rtrash test: stat failed"));
     }
     match std::fs::symlink_metadata(path) {
         Ok(m) => Look::There(Box::new(m)),
