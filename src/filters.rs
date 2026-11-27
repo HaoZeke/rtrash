@@ -1067,7 +1067,10 @@ mod pattern_tests {
     #[test]
     fn a_regex_dot_matches_every_nonempty_path() {
         let _home = pin_home();
-        assert!(Patterns::new(vec![".".into()], Match::Regex)
+        let dot = Patterns::new(vec![".".into()], Match::Regex).unwrap();
+        assert!(dot.is_mass());
+        assert!(!dot.unknown_scope_needs_force());
+        assert!(!Patterns::new(vec![r"\.o$".into()], Match::Regex)
             .unwrap()
             .is_mass());
     }
