@@ -1379,8 +1379,15 @@ and a
 name that is a folder or a link
 .RB ( stray: ).
 A
+.I $I
+whose metadata cannot be read is kept
+.RB ( "unreadable:" ).
+Stray is only a folder or a link.
+A
 .I $R
-that cannot be reached is not dangling, and its
+that cannot be reached is reported as
+.B "unreadable: ... (kept)" ,
+and its
 .I $I
 is kept.
 .B \-\-fix

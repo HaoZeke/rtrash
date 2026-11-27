@@ -542,9 +542,9 @@ pub struct BinScan {
     pub records: Vec<BinRecord>,
     /// The entries left out, one for each problem `status --check` finds:
     /// a `$I` that is not a record file (a folder or a link), one that
-    /// cannot be read, is too large or cannot be parsed, one whose `$R`
-    /// payload is gone, and a `$R` with no `$I`. Other names
-    /// (`desktop.ini`) are the shell's and do not count.
+    /// cannot be read or stat'd, is too large or cannot be parsed, one
+    /// whose `$R` payload is gone or cannot be reached, and a `$R` with
+    /// no `$I`. Other names (`desktop.ini`) are the shell's and do not count.
     pub skipped: u64,
 }
 
@@ -566,7 +566,7 @@ pub fn scan_bin_dir_counted(dir: &Path) -> BinScan {
         let Some(rest) = kept.strip_prefix("$I") else {
             continue;
         };
-        // What the check reports as stray or bad is left out here too.
+        // What the check reports is left out here too.
         let IndexRead::Record(meta) = read_bin_index(&e.path()) else {
             scan.skipped += 1;
             continue;
@@ -616,6 +616,7 @@ pub enum IndexRead {
     Record(RecycleIMeta),
     /// Not a record file: a folder, a link or a junction, which Windows
     /// reports as a link and the check as `stray:`. It is not followed.
+    /// A stat that fails is [`IndexRead::Unread`], not this.
     NotAFile,
     /// A record file that is larger than [`I_RECORD_CAP`] or cannot be
     /// parsed, and why (`bad record:`). A file that cannot be read is
@@ -630,9 +631,17 @@ pub enum IndexRead {
 /// file, the link itself not followed, is opened, and at most
 /// [`I_RECORD_CAP`] bytes of it are read.
 pub fn read_bin_index(record: &Path) -> IndexRead {
-    let is_file = std::fs::symlink_metadata(record).is_ok_and(|m| m.file_type().is_file());
-    if !is_file {
-        return IndexRead::NotAFile;
+    match crate::util::look(record) {
+        crate::util::Look::There(meta) if meta.file_type().is_file() => {}
+        crate::util::Look::There(_) => return IndexRead::NotAFile,
+        // A missing name and a stat that failed (permission, I/O) are
+        // both unreadable. A folder or a link is the only stray.
+        crate::util::Look::Gone => {
+            return IndexRead::Unread("cannot be read (not found)".to_string());
+        }
+        crate::util::Look::Unreachable(e) => {
+            return IndexRead::Unread(format!("cannot be read ({e})"));
+        }
     }
     let body = match read_index(record) {
         IndexLoad::Bytes(b) => b,
@@ -654,6 +663,9 @@ pub enum BinProblem {
     BadRecord { record: PathBuf, why: String },
     /// A `$I` file that cannot be read. `--fix` leaves it.
     Unread { record: PathBuf, why: String },
+    /// A `$I` record whose `$R` cannot be reached. `--fix` leaves it.
+    /// The line uses the same `unreadable: ... (kept)` shape as [`Self::Unread`].
+    Unreached { record: PathBuf, why: String },
     /// A `$R` payload with no `$I` record.
     Orphan { payload: PathBuf },
     /// A `$I` name that is a folder or a link, not a record file.
@@ -683,6 +695,10 @@ impl BinProblem {
             BinProblem::Unread { record, why } => {
                 format!("unreadable: {} (kept; {why})", t(record))
             }
+            BinProblem::Unreached { record, why } => format!(
+                "unreadable: {} (kept; the payload cannot be reached ({why}))",
+                t(record)
+            ),
             BinProblem::Orphan { payload } => format!(
                 "orphan: {} (kept; with no record, list and rm do not show it)",
                 t(payload)
@@ -725,7 +741,8 @@ fn read_index(path: &Path) -> IndexLoad {
 /// The problems in one user's Recycle Bin folder (`X:\$Recycle.Bin\SID`):
 /// the `$I` records in name order, then the `$R` payloads with no record.
 /// Each `$I` is read through [`read_bin_index`], as [`scan_bin_dir`]
-/// reads it, so the scan skips exactly what this reports.
+/// reads it, and a `$R` that is gone or cannot be reached is reported
+/// here, so the scan skips exactly what this reports.
 /// Other names (`desktop.ini`) are the shell's and are not looked at.
 pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -757,12 +774,22 @@ pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
                 continue;
             }
         };
-        // A `$R` that cannot be reached is not gone: `--fix` keeps the `$I`.
-        if crate::util::is_gone(&at(&format!("$R{rest}"))) {
-            out.push(BinProblem::Dangling {
-                record,
-                origin: meta.original,
-            });
+        // Gone is dangling. Unreachable is its own kept line, so `--fix`
+        // does not remove the `$I` (`is_gone` stays false there).
+        match crate::util::look(&at(&format!("$R{rest}"))) {
+            crate::util::Look::There(_) => {}
+            crate::util::Look::Gone => {
+                out.push(BinProblem::Dangling {
+                    record,
+                    origin: meta.original,
+                });
+            }
+            crate::util::Look::Unreachable(e) => {
+                out.push(BinProblem::Unreached {
+                    record,
+                    why: e.to_string(),
+                });
+            }
         }
     }
     for name in &names {
@@ -4747,14 +4774,16 @@ registry), then the total and the free space on each (a warning under
       --json     emit a JSON object (scripts): one root per volume, with
                      orphans and dangling null, cap_bytes and skips_bin
       --check    check each $I record instead: a record whose $R
-                     payload is gone, one that cannot be read
-                     (unreadable: ... (kept)), one that is too big or
-                     cannot be parsed, and a payload with no record;
-                     exit 1 when it finds any
+                     payload is gone, one whose $R cannot be reached
+                     (unreadable: ... (kept)), one that cannot be read
+                     or looked up (unreadable: ... (kept)), one that is
+                     too big or cannot be parsed, and a payload with
+                     no record; exit 1 when it finds any
       --fix      with --check, remove a dangling record and a record
                      that was read and is too big or cannot be parsed.
-                     An unreadable $I is reported and kept. A payload a
-                     bad record named stays
+                     An unreadable $I is reported and kept, including
+                     one whose metadata cannot be read and one whose payload
+                     cannot be reached. A payload a bad record named stays
   -n, --dry-run  with --fix, print what it would remove
       --help     display this help and exit
       --version  output version information and exit
@@ -7093,6 +7122,7 @@ mod tests {
             // mode 000 file, and dropping euid would hit other tests.
             if unsafe { libc::geteuid() } == 0 {
                 let _ = std::fs::remove_dir_all(&dir);
+                crate::test_skip::skip("root reads a mode 000 file; skipping");
                 return;
             }
             std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -7135,6 +7165,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An unreachable `$R` is its own kept line. `is_gone` is false there,
+    /// so `--fix` must not remove the `$I`. The seam makes one sibling
+    /// unreachable while the record still stats.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn an_unreachable_payload_is_reported_and_kept() {
+        let dir = std::env::temp_dir().join(format!("rtrash-bineio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("$IEIO.txt");
+        let payload = dir.join("$REIO.txt");
+        std::fs::write(
+            &record,
+            encode_recycle_i_v2(Path::new(r"C:\eio.txt"), 1, FILETIME_UNIX_EPOCH),
+        )
+        .unwrap();
+        std::fs::write(&payload, b"still here").unwrap();
+        let old = std::env::var_os("RTRASH_TEST_LOOK_IO");
+        struct PutBack(Option<std::ffi::OsString>);
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("RTRASH_TEST_LOOK_IO", v),
+                    None => std::env::remove_var("RTRASH_TEST_LOOK_IO"),
+                }
+            }
+        }
+        let _back = PutBack(old);
+        std::env::set_var("RTRASH_TEST_LOOK_IO", &payload);
+        let scan = scan_bin_dir_counted(&dir);
+        assert!(scan.records.is_empty());
+        assert_eq!(scan.skipped, 1);
+        let problems = check_bin_dir(&dir);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        match &problems[0] {
+            BinProblem::Unreached { record: got, why } => {
+                assert_eq!(got, &record);
+                assert!(
+                    why.contains("Input/output error") || why.contains("EIO"),
+                    "{why}"
+                );
+            }
+            other => panic!("expected an unreached payload, got {other:?}"),
+        }
+        let line = problems[0].line();
+        assert!(line.starts_with("unreadable:"), "{line}");
+        assert!(line.contains("kept"), "{line}");
+        assert!(line.contains("payload"), "{line}");
+        assert!(problems[0].fix_target().is_none());
+        let _ = check_bins("t", std::slice::from_ref(&dir), true, false);
+        assert!(record.exists(), "an unreachable payload is not dangling");
+        assert!(payload.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bin directory that denies search makes both the `$I` and the `$R`
+    /// unstatable. That is unread, not stray and not an orphan, and `--fix`
+    /// keeps the record.
+    #[cfg(unix)]
+    #[test]
+    fn an_unsearchable_bin_keeps_its_record() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions. Root searches a mode 0600
+        // directory, so the stat failure this test needs does not happen.
+        if unsafe { libc::geteuid() } == 0 {
+            crate::test_skip::skip("root searches a mode 0600 directory; skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rtrash-binshut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("$ISHUT.txt");
+        let payload = dir.join("$RSHUT.txt");
+        std::fs::write(
+            &record,
+            encode_recycle_i_v2(Path::new(r"C:\shut.txt"), 1, FILETIME_UNIX_EPOCH),
+        )
+        .unwrap();
+        std::fs::write(&payload, b"payload").unwrap();
+        struct OpenDir(std::path::PathBuf);
+        impl Drop for OpenDir {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _open = OpenDir(dir.clone());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let problems = check_bin_dir(&dir);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        match &problems[0] {
+            BinProblem::Unread { record: got, why } => {
+                assert_eq!(got, &record);
+                assert!(why.contains("cannot be read"), "{why}");
+            }
+            other => panic!("an unstatable record is unread, not {other:?}"),
+        }
+        let line = problems[0].line();
+        assert!(line.starts_with("unreadable:"), "{line}");
+        assert!(line.contains("kept"), "{line}");
+        assert!(!line.contains("not a record file"), "{line}");
+        assert!(problems[0].fix_target().is_none());
+        let _ = check_bins("t", std::slice::from_ref(&dir), true, false);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(record.exists());
+        assert!(payload.exists());
+    }
+
     /// `read_bin_index` takes what the check takes: a record file that
     /// parses. A link to a good record, a folder, a record padded past
     /// the cap and junk are left out of the scan, which counts one entry
@@ -7172,7 +7310,10 @@ mod tests {
             IndexRead::Bad("cannot be parsed as a $I record".to_string())
         );
         assert_eq!(read_bin_index(&at("$IDIRDIR")), IndexRead::NotAFile);
-        assert_eq!(read_bin_index(&at("$IMISSING")), IndexRead::NotAFile);
+        assert!(matches!(
+            read_bin_index(&at("$IMISSING")),
+            IndexRead::Unread(why) if why.contains("cannot be read")
+        ));
         #[cfg(unix)]
         {
             w("$RLINKLI.txt", b"x");
