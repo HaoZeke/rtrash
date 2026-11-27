@@ -154,14 +154,7 @@ fn a_second_list_uses_the_sealed_catalog() {
     assert_eq!(found.len(), 1, "list must write one sealed catalog");
     let raw = fs::read(&found[0]).unwrap();
     assert!(raw.starts_with(b"RTR1"), "catalog magic");
-    assert!(
-        !raw.windows(b"catalog-seal-token.txt".len())
-            .any(|w| w == b"catalog-seal-token.txt"),
-        "the catalog must not store the path in the clear"
-    );
-    let key = sb.root.join("xdg/rtrash/cache.key");
-    assert!(key.is_file(), "key under XDG_DATA_HOME");
-    let mode = fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+    let mode = fs::metadata(&found[0]).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 
     let second = sb.list();
@@ -208,15 +201,25 @@ fn an_external_edit_of_a_record_is_not_served_from_the_catalog() {
         .expect("record")
         .path();
     let body = fs::read_to_string(&info).unwrap();
-    let rewritten = body.replacen("catalog-seal-token.txt", "catalog-external-edit.txt", 1);
+    let mtime = fs::metadata(&info).unwrap().modified().unwrap();
+    let info_dir = sb.trash().join("info");
+    let dir_mtime = fs::metadata(&info_dir).unwrap().modified().unwrap();
+    let rewritten = body.replacen("catalog-seal-token.txt", "catalog-seal-other.txt", 1);
+    assert_eq!(
+        body.len(),
+        rewritten.len(),
+        "the edit keeps the record's length"
+    );
     assert_ne!(body, rewritten, "the record should name the token");
-    fs::write(&info, rewritten).unwrap();
+    fs::write(&info, &rewritten).unwrap();
+    set_mtime(&info, mtime);
+    set_mtime(&info_dir, dir_mtime);
 
     let second = sb.list();
     assert!(second.status.success(), "{}", stderr(&second));
     let text = stdout(&second);
     assert!(
-        text.contains("catalog-external-edit.txt"),
+        text.contains("catalog-seal-other.txt"),
         "the edit must show: {text}"
     );
     assert!(

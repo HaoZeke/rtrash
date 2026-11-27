@@ -1,7 +1,7 @@
 //! Snapshot the real catalog directories at process start and fail the
 //! test binary at exit if they changed. Integration tests link the library
 //! without `cfg(test)`, so the cache is on; a `list` in the test process
-//! otherwise writes `~/.cache/rtrash` and `~/.local/share/rtrash/cache.key`.
+//! otherwise writes `~/.cache/rtrash`. The key directory stays untouched.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

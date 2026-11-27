@@ -221,7 +221,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                 format_bytes(c.bytes)
             ));
         } else {
-            if let Err(e) = remove_entry(dir, &c.name, c.identity) {
+            if let Err(e) = remove_entry(dir, c) {
                 eprintln!(
                     "{prog}: cannot remove '{}': {e}",
                     crate::util::err_path(&shown)
@@ -283,14 +283,20 @@ fn tree_inodes(path: &std::path::Path) -> u64 {
     n
 }
 
-fn remove_entry(
-    dir: &TrashDir,
-    name: &str,
-    identity: Option<trashdir::PayloadId>,
-) -> io::Result<()> {
+fn remove_entry(dir: &TrashDir, c: &Candidate) -> io::Result<()> {
     crate::catalog_cache::invalidate(dir);
-    let payload = crate::util::join_name(&dir.files(), name);
-    if trashdir::payload_id(&payload) != identity {
+    // prune already holds this trash's lock. Entry::relock would take it
+    // again. This is the record read relock makes, and the payload
+    // identity it would compare.
+    let live = crate::list::confirmed_named(dir, &c.name)
+        .ok_or_else(|| io::Error::other("item changed after it was selected; left as it is"))?;
+    if live.original != c.original || live.epoch != c.epoch || live.batch != c.batch {
+        return Err(io::Error::other(
+            "item changed after it was selected; left as it is",
+        ));
+    }
+    let payload = crate::util::join_name(&dir.files(), &c.name);
+    if trashdir::payload_id(&payload) != c.identity {
         return Err(io::Error::other(
             "item changed after it was selected; left as it is",
         ));
@@ -298,7 +304,7 @@ fn remove_entry(
     crate::permanent_guard::remove(&payload)?;
     // The payload is gone: its record goes too before a Ctrl-C acts.
     let _section = crate::interrupt::critical();
-    match fs::remove_file(crate::util::join_info(&dir.info(), name)) {
+    match fs::remove_file(crate::util::join_info(&dir.info(), &c.name)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }

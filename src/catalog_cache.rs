@@ -9,12 +9,14 @@
 //! volume: a time truncated to that volume's tick is still strictly older
 //! than the blob. A rewrite inside the tick changes the hash and is read
 //! again. A clock that reports no nanoseconds never seals. A changed name,
-//! a short or undecryptable blob, or `RTRASH_NO_CACHE` is a full read too.
+//! a short blob, a checksum that fails, or `RTRASH_NO_CACHE` is a full
+//! read too.
 //!
-//! The blob is XChaCha20-Poly1305 under `$XDG_CACHE_HOME/rtrash`. The
-//! 32-byte key is mode 0600 at `$XDG_DATA_HOME/rtrash/cache.key`. Put,
-//! restore, rm and empty delete the blob before they change the trash, so
-//! a hit cannot replay entries from before that command.
+//! The blob is a private file, mode 0600, under `$XDG_CACHE_HOME/rtrash`.
+//! Load checks the owner and the mode and follows no symlink. A checksum
+//! rejects a torn file. Put, restore, rm and empty delete the blob before
+//! they change the trash, so a hit cannot replay entries from before that
+//! command.
 
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -24,15 +26,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-
 use crate::trashdir::TrashDir;
 
 const MAGIC: &[u8; 4] = b"RTR1";
 const VERSION: u32 = 1;
-const NONCE_LEN: usize = 24;
-const KEY_LEN: usize = 32;
+const SUM_LEN: usize = 16;
 /// A record body or a path stored in the blob, matching [`crate::info::RECORD_CAP`].
 const BODY_CAP: usize = 1 << 20;
 const NAME_CAP: usize = 1 << 16;
@@ -126,9 +124,16 @@ pub(crate) fn stamp(dir: &TrashDir) -> Option<Stamp> {
     stamp_of(dir)
 }
 
-/// Write `saved` when `info/` and `files/` still match `before`.
+/// Write `saved` once the trash clock has moved past `before` and a fresh
+/// read of the records is still `saved`.
 pub(crate) fn store_if_unchanged(dir: &TrashDir, before: &Stamp, saved: &Saved) {
     if !enabled() {
+        return;
+    }
+    // A blob is published only after the clock has moved and the records
+    // have been read again. A rewrite inside the tick that was read is a
+    // different body, so it is not what gets stored.
+    if !mtime_settled(before) || !records_on_disk(dir, saved) {
         return;
     }
     let Some(after) = stamp_of(dir) else {
@@ -140,12 +145,7 @@ pub(crate) fn store_if_unchanged(dir: &TrashDir, before: &Stamp, saved: &Saved) 
     let Some(plain) = encode(dir, &after, saved) else {
         return;
     };
-    let Some(key) = load_or_create_key() else {
-        return;
-    };
-    let Some(blob) = seal(&key, &plain) else {
-        return;
-    };
+    let blob = wrap(&plain);
     let Some(path) = cache_path(dir) else {
         return;
     };
@@ -188,12 +188,8 @@ fn load_inner(dir: &TrashDir) -> Option<Saved> {
     if !older_than_file(&live, &meta) {
         return None;
     }
-    if raw.len() < MAGIC.len() + NONCE_LEN + 16 || &raw[..4] != MAGIC {
-        return None;
-    }
-    let key = read_key()?;
-    let plain = open(&key, &raw[4..4 + NONCE_LEN], &raw[4 + NONCE_LEN..])?;
-    let saved = decode(dir, &live, &plain)?;
+    let plain = unwrap_blob(&raw)?;
+    let saved = decode(dir, &live, plain)?;
     bodies_match(&live.bytes, &saved).then_some(saved)
 }
 
@@ -532,26 +528,22 @@ fn push_bytes(b: &mut Vec<u8>, v: &[u8]) {
     b.extend_from_slice(v);
 }
 
-fn seal(key: &[u8; KEY_LEN], plain: &[u8]) -> Option<Vec<u8>> {
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    fill_random(&mut nonce_bytes).ok()?;
-    let cipher = XChaCha20Poly1305::new_from_slice(key).ok()?;
-    let nonce = XNonce::from_slice(&nonce_bytes);
-    let ct = cipher.encrypt(nonce, plain).ok()?;
-    let mut out = Vec::with_capacity(4 + NONCE_LEN + ct.len());
+fn wrap(plain: &[u8]) -> Vec<u8> {
+    let sum = fnv128(b"rtrash-catalog-sum-v1", plain);
+    let mut out = Vec::with_capacity(MAGIC.len() + plain.len() + SUM_LEN);
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ct);
-    Some(out)
+    out.extend_from_slice(plain);
+    out.extend_from_slice(&sum.to_le_bytes());
+    out
 }
 
-fn open(key: &[u8; KEY_LEN], nonce: &[u8], ct: &[u8]) -> Option<Vec<u8>> {
-    if nonce.len() != NONCE_LEN {
+fn unwrap_blob(raw: &[u8]) -> Option<&[u8]> {
+    if raw.len() < MAGIC.len() + SUM_LEN || &raw[..MAGIC.len()] != MAGIC {
         return None;
     }
-    let cipher = XChaCha20Poly1305::new_from_slice(key).ok()?;
-    let nonce = XNonce::from_slice(nonce);
-    cipher.decrypt(nonce, ct).ok()
+    let body = &raw[MAGIC.len()..raw.len() - SUM_LEN];
+    let sum = u128::from_le_bytes(raw[raw.len() - SUM_LEN..].try_into().ok()?);
+    (fnv128(b"rtrash-catalog-sum-v1", body) == sum).then_some(body)
 }
 
 fn cache_path(dir: &TrashDir) -> Option<PathBuf> {
@@ -584,13 +576,6 @@ fn cache_dir() -> Option<PathBuf> {
     xdg("XDG_CACHE_HOME", ".cache").map(|p| p.join("rtrash"))
 }
 
-fn key_path() -> Option<PathBuf> {
-    if let Some((_, data)) = override_dirs() {
-        return Some(data.join("cache.key"));
-    }
-    xdg("XDG_DATA_HOME", ".local/share").map(|p| p.join("rtrash/cache.key"))
-}
-
 fn xdg(var: &str, home_rel: &str) -> Option<PathBuf> {
     if let Some(v) = std::env::var_os(var) {
         if !v.is_empty() {
@@ -602,70 +587,6 @@ fn xdg(var: &str, home_rel: &str) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(home).join(home_rel))
-}
-
-fn read_key() -> Option<[u8; KEY_LEN]> {
-    let path = key_path()?;
-    let parent = path.parent()?;
-    if !dir_is_private(parent) {
-        return None;
-    }
-    let (bytes, _) = read_private(&path)?;
-    <[u8; KEY_LEN]>::try_from(bytes).ok()
-}
-
-fn load_or_create_key() -> Option<[u8; KEY_LEN]> {
-    let path = key_path()?;
-    let parent = path.parent()?;
-    if !ensure_private_dir(parent) {
-        return None;
-    }
-    if let Some(key) = read_key() {
-        return Some(key);
-    }
-    // A symlink is removed as a link. A loose file of ours is replaced.
-    // Someone else's file is left where it is, and there is no key.
-    if path_exists(&path) && !discard_untrusted(&path) {
-        return None;
-    }
-    create_key(&path)
-}
-
-fn path_exists(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok()
-}
-
-/// Remove a symlink or a regular file this user owns at `path`.
-fn discard_untrusted(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return true;
-    };
-    let ours = meta.file_type().is_symlink() || (meta.is_file() && meta.uid() == our_uid());
-    ours && fs::remove_file(path).is_ok()
-}
-
-fn create_key(path: &Path) -> Option<[u8; KEY_LEN]> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut key = [0u8; KEY_LEN];
-    fill_random(&mut key).ok()?;
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true).mode(0o600);
-    match opts.open(path) {
-        Ok(mut f) => {
-            let bad = f.write_all(&key).is_err()
-                || f.sync_all().is_err()
-                || f.set_permissions(mode(0o600)).is_err()
-                || !f.metadata().is_ok_and(|m| private_file(&m));
-            if bad {
-                let _ = fs::remove_file(path);
-                return None;
-            }
-            Some(key)
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => read_key(),
-        Err(_) => None,
-    }
 }
 
 /// `path` is this user's real directory, and group and other have no
@@ -768,6 +689,22 @@ fn open_flags(path: &Path, flags: i32) -> io::Result<fs::File> {
     Ok(fs::File::from(owned))
 }
 
+/// The records on disk, read again now that the trash clock has moved.
+/// What gets published has to be these bytes, not the bodies from the
+/// first read of a frozen tick.
+fn records_on_disk(dir: &TrashDir, saved: &Saved) -> bool {
+    for rec in &saved.records {
+        let path = dir.info().join(std::ffi::OsStr::from_bytes(&rec.file_name));
+        let Ok(body) = crate::info::read_bounded(&path, crate::info::RECORD_CAP) else {
+            return false;
+        };
+        if body != rec.body {
+            return false;
+        }
+    }
+    true
+}
+
 /// The sealed bodies are the bytes the stamp hashed. A blob whose record
 /// text is not those bytes is not a catalog, even when the stamp's times
 /// still match the files.
@@ -821,11 +758,6 @@ fn record_hashes(stamp: &[u8]) -> Option<Vec<(Vec<u8>, u128)>> {
         i += hash_end;
     }
     Some(out)
-}
-
-fn fill_random(buf: &mut [u8]) -> io::Result<()> {
-    let mut f = fs::File::open("/dev/urandom")?;
-    std::io::Read::read_exact(&mut f, buf)
 }
 
 fn mode(bits: u32) -> fs::Permissions {
@@ -885,6 +817,12 @@ fn apply_clock(rows: &mut [Row]) {
 #[cfg(test)]
 fn override_dirs() -> Option<(PathBuf, PathBuf)> {
     OVERRIDE.with(|o| o.borrow().clone())
+}
+
+/// Point the catalog at `dirs` for this thread, or turn that off.
+#[cfg(test)]
+pub(crate) fn set_test_dirs(dirs: Option<(PathBuf, PathBuf)>) {
+    OVERRIDE.with(|o| *o.borrow_mut() = dirs);
 }
 
 #[cfg(not(test))]
@@ -1054,24 +992,22 @@ mod tests {
         );
         let loaded = load(&iso.dir).expect("hit");
         assert_eq!(loaded, saved);
-        let blob = fs::read(cache_path(&iso.dir).unwrap()).unwrap();
+        let path = cache_path(&iso.dir).unwrap();
+        let blob = fs::read(&path).unwrap();
         assert!(blob.starts_with(b"RTR1"));
-        assert!(
-            !blob
-                .windows(b"/tmp/hello.txt".len())
-                .any(|w| w == b"/tmp/hello.txt"),
-            "sealed blob must not contain Path= plaintext"
-        );
-        let key = key_path().unwrap();
         assert_eq!(
-            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        fs::write(
-            iso.dir.info().join("hello.txt.trashinfo"),
-            b"rewritten-by-another-tool",
-        )
-        .unwrap();
+        let info = iso.dir.info().join("hello.txt.trashinfo");
+        let old = fs::read(&info).unwrap();
+        let from = b"/tmp/hello.txt";
+        let to = b"/tmp/other.txt";
+        assert_eq!(from.len(), to.len());
+        let at = old.windows(from.len()).position(|w| w == from).unwrap();
+        let mut next = old;
+        next[at..at + from.len()].copy_from_slice(to);
+        fs::write(&info, &next).unwrap();
         assert!(load(&iso.dir).is_none(), "an external rewrite must miss");
         invalidate(&iso.dir);
         assert!(load(&iso.dir).is_none());
@@ -1124,17 +1060,18 @@ mod tests {
         assert_eq!(second[0].original, first[0].original);
         let notes = NOTES.with(|n| n.borrow().clone());
         assert_eq!(notes, ["hit"], "the second collect must use the catalog");
-        fs::write(
-            iso.dir.info().join("item.txt.trashinfo"),
-            b"[Trash Info]\nPath=/tmp/catalog-after-external\nDeletionDate=2026-01-02T03:04:05\n",
-        )
-        .unwrap();
+        let info = iso.dir.info().join("item.txt.trashinfo");
+        let old = fs::read(&info).unwrap();
+        let next = swapped_body(&old);
+        assert_eq!(
+            old.len(),
+            next.len(),
+            "the rewrite keeps the record's length"
+        );
+        fs::write(&info, &next).unwrap();
         NOTES.with(|n| n.borrow_mut().clear());
         let third = crate::list::collect(std::slice::from_ref(&iso.dir));
-        assert_eq!(
-            third[0].original,
-            PathBuf::from("/tmp/catalog-after-external")
-        );
+        assert_eq!(third[0].original, PathBuf::from("/tmp/catalog-rewrit"));
         let notes = NOTES.with(|n| n.borrow().clone());
         assert_eq!(notes, ["scan"], "an external edit must not hit");
     }
@@ -1350,47 +1287,20 @@ mod tests {
     }
 
     #[test]
-    fn a_symlink_key_is_not_followed() {
-        let iso = Isolated::open();
-        write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
-        backdate_tree(&iso.dir);
-        let target = iso.root.join("other-key");
-        fs::write(&target, [9u8; 32]).unwrap();
-        fs::set_permissions(&target, mode(0o600)).unwrap();
-        std::os::unix::fs::symlink(&target, key_path().unwrap()).unwrap();
-        seal_hello(&iso);
-        assert_eq!(
-            fs::read(&target).unwrap(),
-            vec![9u8; 32],
-            "opening the key followed the symlink"
-        );
-        assert!(
-            fs::symlink_metadata(key_path().unwrap())
-                .unwrap()
-                .file_type()
-                .is_file(),
-            "the key path is still a symlink"
-        );
-    }
-
-    #[test]
-    fn a_group_readable_key_is_not_used() {
+    fn a_group_readable_blob_is_not_a_hit() {
         let iso = Isolated::open();
         write_record(&iso.dir, "hello.txt", "/tmp/hello.txt");
         backdate_tree(&iso.dir);
         seal_hello(&iso);
         assert!(load(&iso.dir).is_some());
-        fs::set_permissions(key_path().unwrap(), mode(0o644)).unwrap();
+        let blob = cache_path(&iso.dir).unwrap();
+        fs::set_permissions(&blob, mode(0o644)).unwrap();
         assert!(
             load(&iso.dir).is_none(),
-            "a key other users can read is used"
+            "a catalog other users can read is used"
         );
-        let mode = fs::symlink_metadata(key_path().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o644, "reading the catalog replaced the loose key");
+        let mode = fs::symlink_metadata(&blob).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "reading the catalog changed its mode");
     }
 
     #[test]

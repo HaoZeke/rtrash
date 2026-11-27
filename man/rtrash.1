@@ -5250,9 +5250,8 @@ trash-stats, retention and the Python
 binding reuse it when
 the records still match and their modification times are older than
 the catalog by more than the coarse clock's tick.
-The key is
-.I $XDG_DATA_HOME/rtrash/cache.key
-(mode 0600).
+The file is mode 0600. Load uses it only when its owner is this user,
+group and other have no permission on it, and it is not a symlink.
 Put, restore, rm and empty remove the catalog.
 .B RTRASH_NO_CACHE
 set to
@@ -5262,7 +5261,7 @@ or
 .B yes
 skips the catalog and does not delete it.
 The macOS Finder list and the Windows Recycle Bin never use it.
-A catalog that does not decrypt, or whose stamp no longer matches, is
+A catalog whose checksum fails, or whose stamp no longer matches, is
 ignored and the records are read.
 When
 .B XDG_CACHE_HOME

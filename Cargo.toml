@@ -82,14 +82,6 @@ unicode-normalization = { version = "0.1", default-features = false, features = 
   "std",
 ] }
 
-# Sealed per-root catalog of trash records. Unix only. Pure Rust; the nonce
-# comes from /dev/urandom, so the getrandom feature stays off.
-[target.'cfg(unix)'.dependencies]
-chacha20poly1305 = { version = "0.10.1", default-features = false, features = [
-  "alloc",
-  "std",
-] }
-
 # musl's malloc serialises threads on one lock; the parallel du walk needs a
 # faster allocator there. glibc builds keep the system allocator.
 [target.'cfg(target_env = "musl")'.dependencies]

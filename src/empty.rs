@@ -1641,6 +1641,109 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// The catalog still names the old path and date. The records on disk
+    /// have been rewritten, same length, and retention has to follow those.
+    #[test]
+    fn retention_follows_the_disk_when_the_catalog_is_stale() {
+        let _reset = Reset;
+        let root = scratch("catalog-stale");
+        let cache = root.join("cache");
+        let data = root.join("data");
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        crate::catalog_cache::set_test_dirs(Some((cache.clone(), data)));
+        struct ClearCatalog;
+        impl Drop for ClearCatalog {
+            fn drop(&mut self) {
+                crate::catalog_cache::set_test_dirs(None);
+            }
+        }
+        let _clear = ClearCatalog;
+        let old = "2020-01-01T00:00:00";
+        let new = "2026-11-27T16:36:00";
+        write_item(&root, "aaaa", "/tmp/not-kept", old, None);
+        write_item(&root, "bbbb", "/tmp/yes-kept", new, None);
+        backdate_trash(&root);
+        let dir = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        let sealed = crate::list::collect(std::slice::from_ref(&dir));
+        assert_eq!(sealed[0].original, PathBuf::from("/tmp/not-kept"));
+        assert_eq!(sealed[1].original, PathBuf::from("/tmp/yes-kept"));
+        let blob = fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("the catalog was published")
+            .path();
+        let raw = fs::read(&blob).unwrap();
+        assert!(
+            raw.windows(b"/tmp/not-kept".len())
+                .any(|w| w == b"/tmp/not-kept"),
+            "the catalog holds the stale path"
+        );
+        assert!(
+            raw.windows(old.len()).any(|w| w == old.as_bytes()),
+            "the catalog holds the stale date"
+        );
+        let budget = one_item_budget(&root);
+        let r = root.clone();
+        crate::list::on_after_collect(Box::new(move || {
+            let put = |name: &str, path: &str, date: &str| {
+                let body = format!("[Trash Info]\nPath={path}\nDeletionDate={date}\n");
+                fs::write(r.join("info").join(format!("{name}.trashinfo")), body).unwrap();
+            };
+            put("aaaa", "/tmp/yes-kept", new);
+            put("bbbb", "/tmp/not-kept", old);
+        }));
+        crate::keep::set_test_paths(vec![PathBuf::from("/tmp/yes-kept")]);
+        let done = crate::retention::prune(
+            "rtrash",
+            &[dir],
+            &crate::retention::Prune {
+                max: budget,
+                policy: crate::retention::Policy::Oldest,
+                dry_run: false,
+                human: crate::util::HumanOutput::default(),
+                protect_batch: None,
+                gone_before: None,
+                free_inodes: 0,
+                only: None,
+            },
+        );
+        assert_eq!(done.errors, 0, "a changed record must still be decided");
+        assert_eq!(done.removed, 1);
+        assert!(
+            root.join("files/aaaa").exists(),
+            "the live record is kept and newer"
+        );
+        assert!(
+            !root.join("files/bbbb").exists(),
+            "the live record is older and not kept"
+        );
+        let kept = fs::read_to_string(root.join("info/aaaa.trashinfo")).unwrap();
+        assert!(kept.contains("/tmp/yes-kept"), "{kept}");
+        assert!(kept.contains(new), "{kept}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn backdate_trash(root: &std::path::Path) {
+        let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+        let set = |p: &std::path::Path| {
+            let f = fs::OpenOptions::new().read(true).open(p).unwrap();
+            let times = fs::FileTimes::new().set_accessed(ago).set_modified(ago);
+            f.set_times(times).unwrap();
+        };
+        for sub in ["info", "files"] {
+            let dir = root.join(sub);
+            for ent in fs::read_dir(&dir).unwrap().flatten() {
+                set(&ent.path());
+            }
+            set(&dir);
+        }
+    }
+
     /// An unscoped empty had wiped the trash when the sealed batches were
     /// all the latest put and a live record was not.
     #[test]
