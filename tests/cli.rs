@@ -748,6 +748,7 @@ fn on_a_terminal(sb: &Sandbox, args: &str) -> Option<String> {
         .env("SHELL", "/bin/sh")
         .env("NO_COLOR", "1")
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CACHE_HOME", sb.root.join(".cache"))
         .env("XDG_CONFIG_HOME", sb.root.join(".config"))
         .env("HOME", &sb.root)
         .stdin(Stdio::null())
@@ -848,6 +849,7 @@ fn restore_errors_scrub_control_characters_on_a_terminal() {
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CACHE_HOME", sb.root.join(".cache"))
         .env("XDG_CONFIG_HOME", sb.root.join(".config"))
         .env("HOME", &sb.root)
         .stdin(Stdio::null())
@@ -1944,6 +1946,37 @@ fn home_only_empty_ignores_foreign_trash_dir() {
     assert!(
         foreign.join("files/vol.dat").is_file(),
         "volume trash must survive --home-only empty"
+    );
+}
+
+/// Records with no `X-Rtrash-Batch` are not the latest put. An unscoped
+/// empty must refuse them and leave the files. Stdin is closed so a
+/// terminal does not make the guard wait for an answer.
+#[test]
+fn an_unscoped_empty_refuses_a_trash_with_no_batch() {
+    let sb = Sandbox::new("no-batch");
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    fs::write(sb.trash().join("files/plain.txt"), b"keep").unwrap();
+    fs::write(
+        sb.trash().join("info/plain.txt.trashinfo"),
+        "[Trash Info]\nPath=/tmp/plain.txt\nDeletionDate=2020-01-01T00:00:00\n",
+    )
+    .unwrap();
+    let out = common::rtrash(&sb.root)
+        .args(["empty", "--home-only", "--plain"])
+        .current_dir(sb.work())
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run rtrash");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(
+        sb.trash().join("files/plain.txt").is_file(),
+        "the payload went"
+    );
+    assert!(
+        sb.trash().join("info/plain.txt.trashinfo").is_file(),
+        "the record went"
     );
 }
 
@@ -4878,6 +4911,7 @@ fn multicall_names_dispatch() {
             .args(args)
             .current_dir(sb.work())
             .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CACHE_HOME", sb.root.join(".cache"))
             .env("HOME", &sb.root)
             .output()
             .unwrap()
@@ -4936,6 +4970,7 @@ fn list_hints_once_at_records_it_leaves_out() {
             .arg(&pin)
             .current_dir(sb.work())
             .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CACHE_HOME", sb.root.join(".cache"))
             .env("HOME", &sb.root)
             .output()
             .unwrap()
@@ -5050,6 +5085,7 @@ fn list_leaves_out_a_record_with_no_path_and_counts_it() {
             .arg(&pin)
             .current_dir(sb.work())
             .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CACHE_HOME", sb.root.join(".cache"))
             .env("HOME", &sb.root)
             .output()
             .unwrap()
@@ -5128,6 +5164,7 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
             .arg(&pin)
             .current_dir(sb.work())
             .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CACHE_HOME", sb.root.join(".cache"))
             .env("HOME", &sb.root)
             .output()
             .unwrap()
@@ -5286,6 +5323,7 @@ fn list_prints_one_hint_line_per_trash_folder_with_broken_records() {
         .args(&pins)
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CACHE_HOME", sb.root.join(".cache"))
         .env("HOME", &sb.root)
         .output()
         .unwrap();
@@ -5341,6 +5379,7 @@ fn trash_list_size_and_files_keep_trash_cli_rows() {
             .args(args)
             .current_dir(&w)
             .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CACHE_HOME", sb.root.join(".cache"))
             .env("HOME", &sb.root)
             .output()
             .unwrap()
@@ -5412,6 +5451,7 @@ fn trash_cli_command_lines_work_under_the_trash_names() {
             .args(args)
             .current_dir(sb.work())
             .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CACHE_HOME", sb.root.join(".cache"))
             .env("HOME", &sb.root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -5478,6 +5518,7 @@ fn trash_restore_name_follows_trash_cli() {
             .args(args)
             .current_dir(dir)
             .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CACHE_HOME", sb.root.join(".cache"))
             .env("HOME", &sb.root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -7560,6 +7601,7 @@ fn list_scrubs_control_characters_on_a_terminal() {
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CACHE_HOME", sb.root.join(".cache"))
         .env("XDG_CONFIG_HOME", sb.root.join(".config"))
         .env("HOME", &sb.root)
         .stdin(Stdio::null())
@@ -9070,6 +9112,7 @@ fn put_refuse_does_not_take_an_uninspected_process_for_a_free_file() {
         .current_dir(sb.work())
         .env("HOME", &sb.root)
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CACHE_HOME", sb.root.join(".cache"))
         .env("RTRASH_TEST_PROC", &blind)
         .env("RTRASH_IN_USE", "refuse")
         .output()

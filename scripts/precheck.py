@@ -1087,6 +1087,12 @@ OWN = "a file rtrash wrote itself (cache, temp or link), not user data"
 MOVE = "a move: the source goes only after the whole copy is in place"
 BATCH = "a batch the caller counted up front with permanent_guard::gate_many"
 PERMANENT_ALLOW = {
+    ("catalog_cache.rs", "invalidate_root"): (1, OWN + ": the sealed catalog of a trash that changed"),
+    ("catalog_cache.rs", "store_if_unchanged"): (
+        1,
+        OWN + ": the catalog blob when it is not a private file, or when a "
+        "source mtime still shares the blob's coarse tick",
+    ),
     ("du_dupes.rs", "clone_file"): (2, OWN + ": the clone target it just created"),
     ("du_dupes.rs", "link_one"): (2, OWN + ": the .rtrash-link temp beside the duplicate"),
     ("empty.rs", "empty_exact"): (1, RECORD),
@@ -1891,7 +1897,9 @@ LOCK_SITES = {
 LOCKED_REMOVERS = {
     ("src/empty.rs", "empty_one"): "runs with the lock held, scans under it and checks "
                                    "each item against trashdir::Seen",
-    ("src/retention.rs", "remove_entry"): "prune lists the items under the locks it holds",
+    ("src/retention.rs", "remove_entry"): "prune holds the locks, so this re-reads through "
+                                           "list::confirmed_named instead of Entry::relock and "
+                                           "removes a record only when it still matches",
     ("src/wsl_bin.rs", "remove_entry"): "the Windows Recycle Bin has no trash lock; "
                                         "BinEntry::recheck reads the record again first",
 }
@@ -3704,6 +3712,14 @@ def check_bin_seam():
     if '.env("RTRASH_TEST_BIN_DIR"' not in fn_body(rust_code(common, strings=True), "rtrash"):
         errors.append("tests/common/mod.rs: rtrash(home) does not set RTRASH_TEST_BIN_DIR; "
                       "Windows runs would reach the system Recycle Bin")
+    body = rust_code(common, strings=True)
+    if '.env("XDG_CACHE_HOME"' not in fn_body(body, "rtrash"):
+        errors.append("tests/common/mod.rs: rtrash(home) does not set XDG_CACHE_HOME; "
+                      "an integration test links the library without cfg(test), so the "
+                      "catalog is on and would write the real cache")
+    if '.env("XDG_CACHE_HOME"' not in fn_body(body, "rtrash_real"):
+        errors.append("tests/common/mod.rs: rtrash_real does not set XDG_CACHE_HOME; "
+                      "a run with the caller's home would write the real cache")
     for path in sorted((ROOT / "tests").rglob("*.rs")):
         text = rust_code(path.read_text(encoding="utf-8"), strings=True)
         for m in re.finditer(r'env_remove\(\s*"RTRASH_TEST_BIN_DIR"', text):

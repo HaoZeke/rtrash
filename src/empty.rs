@@ -249,7 +249,28 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
     status
 }
 
-/// trash-cli's `-i` prompt: name the trash directories, read a y or n.
+/// Whether every item `dirs` holds came from the latest put, read again
+/// from the records. A catalog hit is not that reading: a same-length
+/// rewrite can leave it naming a batch the record no longer has, and the
+/// wipe that follows this check deletes by the names it counted. No batch
+/// on any record is not a latest put: an empty would otherwise wipe a
+/// trash rtrash did not fill.
+fn latest_put_ok(prog: &str, dirs: &[TrashDir]) -> bool {
+    let scanned = list::collect(dirs);
+    #[cfg(test)]
+    crate::list::fire_after_collect();
+    let total = scanned.len();
+    let live: Vec<list::Entry> = scanned.iter().filter_map(list::confirmed).collect();
+    let unread = total - live.len();
+    let latest = crate::undo::batches(&live).first().map(|b| b.id.clone());
+    let foreign = unread
+        + live
+            .iter()
+            .filter(|e| latest.is_none() || e.batch != latest)
+            .count();
+    crate::budget::guard_ok(prog, total, foreign)
+}
+
 /// Whether this empty would take everything: no age, size or free-space
 /// cut, no `--trash-dir` pin, no `--all`, and not a dry run.
 fn unscoped(opts: &Opts) -> bool {
@@ -266,6 +287,7 @@ fn count(dirs: &[TrashDir]) -> Vec<trashdir::Seen> {
     dirs.iter().map(trashdir::Seen::take).collect()
 }
 
+/// trash-cli's `-i` prompt: name the trash directories, read a y or n.
 fn confirm(seen: &[trashdir::Seen]) -> bool {
     eprintln!("Would empty the following trash directories:");
     for s in seen {
@@ -531,16 +553,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    if !opts.interactive && unscoped(&opts) {
-        let entries = list::collect(&dirs);
-        let latest = crate::undo::batches(&entries).first().map(|b| b.id.clone());
-        let foreign = entries
-            .iter()
-            .filter(|e| latest.is_none() || e.batch != latest)
-            .count();
-        if !crate::budget::guard_ok(prog, entries.len(), foreign) {
-            return 2;
-        }
+    if !opts.interactive && unscoped(&opts) && !latest_put_ok(prog, &dirs) {
+        return 2;
     }
 
     let cutoff = opts.days.map(|secs| info::now_epoch() - secs);
@@ -1121,6 +1135,7 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
             }
         };
         let (payload, info_path) = (held.payload(), held.record());
+        crate::catalog_cache::invalidate(&entry.dir);
         if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",
@@ -1491,6 +1506,302 @@ mod tests {
         ] {
             empty_with_late_items(tag, args);
         }
+    }
+
+    /// Clears a collect hook and a keep-file override, including when the
+    /// test fails before it reaches the end.
+    struct Reset;
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::list::clear_after_collect();
+            crate::keep::clear_test_paths();
+        }
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("rtrash-empty-live-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("files")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        root
+    }
+
+    fn write_item(root: &std::path::Path, name: &str, path: &str, date: &str, batch: Option<&str>) {
+        fs::write(root.join("files").join(name), vec![b'x'; 8192]).unwrap();
+        let mut body = format!("[Trash Info]\nPath={path}\nDeletionDate={date}\n");
+        if let Some(b) = batch {
+            body.push_str(&format!("X-Rtrash-Batch={b}\n"));
+        }
+        fs::write(root.join("info").join(format!("{name}.trashinfo")), body).unwrap();
+    }
+
+    fn one_item_budget(root: &std::path::Path) -> u64 {
+        let dir = TrashDir {
+            root: root.to_path_buf(),
+            topdir: None,
+        };
+        let sizes = trashdir::DirSizes::load(&dir);
+        let a = sizes.entry_bytes("aaaa");
+        let b = sizes.entry_bytes("bbbb");
+        assert!(
+            a > 0 && b > 0,
+            "a size budget needs a disk use, got {a} and {b}"
+        );
+        a + b - 1
+    }
+
+    /// `empty --max-size` had removed the item the sealed bodies called
+    /// oldest. The record on disk is what decides, including a same-length
+    /// date swap that lands after the catalog is read.
+    #[test]
+    fn empty_max_size_removes_the_item_the_live_date_calls_oldest() {
+        let _reset = Reset;
+        let root = scratch("live-date");
+        let old = "2020-01-01T00:00:00";
+        let new = "2026-11-27T16:36:00";
+        write_item(&root, "aaaa", "/tmp/aaaa", old, None);
+        write_item(&root, "bbbb", "/tmp/bbbb", new, None);
+        let budget = one_item_budget(&root);
+        let r = root.clone();
+        crate::list::on_after_collect(Box::new(move || {
+            // The payload stays. Only the record changes, same length, which
+            // is what a coarse tick can hide from a stamp of the file.
+            let put = |name: &str, date: &str| {
+                let body = format!("[Trash Info]\nPath=/tmp/{name}\nDeletionDate={date}\n");
+                fs::write(r.join("info").join(format!("{name}.trashinfo")), body).unwrap();
+            };
+            put("aaaa", new);
+            put("bbbb", old);
+        }));
+        let dir = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        let done = crate::retention::prune(
+            "rtrash",
+            &[dir],
+            &crate::retention::Prune {
+                max: budget,
+                policy: crate::retention::Policy::Oldest,
+                dry_run: false,
+                human: crate::util::HumanOutput::default(),
+                protect_batch: None,
+                gone_before: None,
+                free_inodes: 0,
+                only: None,
+            },
+        );
+        assert_eq!(done.errors, 0);
+        assert_eq!(done.removed, 1);
+        assert!(
+            root.join("files/aaaa").exists(),
+            "the live record is the newer one and stays"
+        );
+        assert!(
+            !root.join("files/bbbb").exists(),
+            "the live record is the older one and goes"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `empty --max-size=0` had deleted a payload whose live Path= is in
+    /// the keep file, because the catalog still named a path that is not.
+    #[test]
+    fn empty_max_size_keeps_a_path_the_live_record_names() {
+        let _reset = Reset;
+        let root = scratch("live-keep");
+        write_item(&root, "item", "/tmp/not-kept", "2020-01-01T00:00:00", None);
+        crate::keep::set_test_paths(vec![PathBuf::from("/tmp/yes-kept")]);
+        let r = root.clone();
+        crate::list::on_after_collect(Box::new(move || {
+            let body = "[Trash Info]\nPath=/tmp/yes-kept\nDeletionDate=2020-01-01T00:00:00\n";
+            fs::write(r.join("info/item.trashinfo"), body).unwrap();
+        }));
+        let dir = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        let done = crate::retention::prune(
+            "rtrash",
+            &[dir],
+            &crate::retention::Prune {
+                max: 0,
+                policy: crate::retention::Policy::Oldest,
+                dry_run: false,
+                human: crate::util::HumanOutput::default(),
+                protect_batch: None,
+                gone_before: None,
+                free_inodes: 0,
+                only: None,
+            },
+        );
+        assert_eq!(done.errors, 0);
+        assert_eq!(done.removed, 0);
+        assert!(
+            root.join("files/item").exists(),
+            "the live path is in the keep file"
+        );
+        assert!(root.join("info/item.trashinfo").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The catalog still names the old path and date. The records on disk
+    /// have been rewritten, same length, and retention has to follow those.
+    #[test]
+    fn retention_follows_the_disk_when_the_catalog_is_stale() {
+        let _reset = Reset;
+        let root = scratch("catalog-stale");
+        let cache = root.join("cache");
+        let data = root.join("data");
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        crate::catalog_cache::set_test_dirs(Some((cache.clone(), data)));
+        struct ClearCatalog;
+        impl Drop for ClearCatalog {
+            fn drop(&mut self) {
+                crate::catalog_cache::set_test_dirs(None);
+            }
+        }
+        let _clear = ClearCatalog;
+        let old = "2020-01-01T00:00:00";
+        let new = "2026-11-27T16:36:00";
+        write_item(&root, "aaaa", "/tmp/not-kept", old, None);
+        write_item(&root, "bbbb", "/tmp/yes-kept", new, None);
+        backdate_trash(&root);
+        let dir = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        let sealed = crate::list::collect(std::slice::from_ref(&dir));
+        assert_eq!(sealed[0].original, PathBuf::from("/tmp/not-kept"));
+        assert_eq!(sealed[1].original, PathBuf::from("/tmp/yes-kept"));
+        let blob = fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("the catalog was published")
+            .path();
+        let raw = fs::read(&blob).unwrap();
+        assert!(
+            raw.windows(b"/tmp/not-kept".len())
+                .any(|w| w == b"/tmp/not-kept"),
+            "the catalog holds the stale path"
+        );
+        assert!(
+            raw.windows(old.len()).any(|w| w == old.as_bytes()),
+            "the catalog holds the stale date"
+        );
+        let budget = one_item_budget(&root);
+        let r = root.clone();
+        crate::list::on_after_collect(Box::new(move || {
+            let put = |name: &str, path: &str, date: &str| {
+                let body = format!("[Trash Info]\nPath={path}\nDeletionDate={date}\n");
+                fs::write(r.join("info").join(format!("{name}.trashinfo")), body).unwrap();
+            };
+            put("aaaa", "/tmp/yes-kept", new);
+            put("bbbb", "/tmp/not-kept", old);
+        }));
+        crate::keep::set_test_paths(vec![PathBuf::from("/tmp/yes-kept")]);
+        let done = crate::retention::prune(
+            "rtrash",
+            &[dir],
+            &crate::retention::Prune {
+                max: budget,
+                policy: crate::retention::Policy::Oldest,
+                dry_run: false,
+                human: crate::util::HumanOutput::default(),
+                protect_batch: None,
+                gone_before: None,
+                free_inodes: 0,
+                only: None,
+            },
+        );
+        assert_eq!(done.errors, 0, "a changed record must still be decided");
+        assert_eq!(done.removed, 1);
+        assert!(
+            root.join("files/aaaa").exists(),
+            "the live record is kept and newer"
+        );
+        assert!(
+            !root.join("files/bbbb").exists(),
+            "the live record is older and not kept"
+        );
+        let kept = fs::read_to_string(root.join("info/aaaa.trashinfo")).unwrap();
+        assert!(kept.contains("/tmp/yes-kept"), "{kept}");
+        assert!(kept.contains(new), "{kept}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn backdate_trash(root: &std::path::Path) {
+        let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+        let set = |p: &std::path::Path| {
+            let f = fs::OpenOptions::new().read(true).open(p).unwrap();
+            let times = fs::FileTimes::new().set_accessed(ago).set_modified(ago);
+            f.set_times(times).unwrap();
+        };
+        for sub in ["info", "files"] {
+            let dir = root.join(sub);
+            for ent in fs::read_dir(&dir).unwrap().flatten() {
+                set(&ent.path());
+            }
+            set(&dir);
+        }
+    }
+
+    /// An unscoped empty had wiped the trash when the sealed batches were
+    /// all the latest put and a live record was not.
+    #[test]
+    fn an_unscoped_empty_refuses_a_live_batch_from_an_older_put() {
+        let _reset = Reset;
+        let root = scratch("live-batch");
+        let latest = "2000000000000-1";
+        let older = "1000000000000-1";
+        write_item(
+            &root,
+            "one",
+            "/tmp/one",
+            "2020-01-01T00:00:00",
+            Some(latest),
+        );
+        write_item(
+            &root,
+            "two",
+            "/tmp/two",
+            "2020-01-01T00:00:01",
+            Some(latest),
+        );
+        let r = root.clone();
+        crate::list::on_after_collect(Box::new(move || {
+            let mut body = String::from("[Trash Info]\nPath=/tmp/two\n");
+            body.push_str("DeletionDate=2020-01-01T00:00:01\n");
+            body.push_str("X-Rtrash-Batch=");
+            body.push_str(older);
+            body.push('\n');
+            fs::write(r.join("info/two.trashinfo"), body).unwrap();
+        }));
+        // guard_ok asks on a terminal and would read this process's stdin.
+        // The refusal under test is the non-interactive one. The home trash
+        // and the FreeDesktop backend are pinned here so `empty` runs
+        // against this directory and not the Finder Trash.
+        let _tty = crate::util::force_stdin_tty(false);
+        let _home = crate::trashdir::override_home_trash(root.clone());
+        let _fdo = crate::finder::force_freedesktop();
+        crate::keep::set_test_paths(Vec::new());
+        let code = run_inner(
+            "rtrash",
+            &["--plain".to_string(), "--home-only".to_string()],
+        );
+        assert_eq!(
+            code, 2,
+            "a live batch from an older put must refuse the empty"
+        );
+        assert!(root.join("files/one").exists());
+        assert!(root.join("files/two").exists());
+        let body = fs::read_to_string(root.join("info/two.trashinfo")).unwrap();
+        assert!(body.contains(older), "{body}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

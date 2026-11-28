@@ -28,6 +28,10 @@ pub struct Candidate {
     pub protected: bool,
     /// Payload identity at selection time, checked again before removal.
     identity: Option<trashdir::PayloadId>,
+    /// Original path and batch the live record had when this was chosen.
+    /// Removal checks them again, so a rewrite in between is left alone.
+    original: std::path::PathBuf,
+    batch: Option<String>,
 }
 
 /// Indices of `items` to remove, in removal order, so the rest totals at
@@ -135,8 +139,14 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             continue;
         }
         let sizes = trashdir::DirSizes::load(dir);
-        let entries: Vec<list::Entry> = list::collect(std::slice::from_ref(dir))
-            .into_iter()
+        let scanned: Vec<list::Entry> = list::collect(std::slice::from_ref(dir));
+        // A catalog hit, or a scan, can be a coarse tick behind the record.
+        // What is kept or removed is the record as it reads now.
+        #[cfg(test)]
+        crate::list::fire_after_collect();
+        let entries: Vec<list::Entry> = scanned
+            .iter()
+            .filter_map(list::confirmed)
             .filter(|e| !p.gone_before.is_some_and(|cut| e.epoch <= cut))
             .collect();
         // Sizing stats every payload; spread it over the rayon pool.
@@ -149,6 +159,8 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                     crate::util::err_path(&e.original)
                 );
             }
+            let original = e.original.clone();
+            let batch = e.batch.clone();
             Candidate {
                 root: ri,
                 bytes: sizes.entry_bytes(&e.name),
@@ -159,13 +171,15 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                     0
                 },
                 protected: kept
-                    || (p.protect_batch.is_some() && e.batch.as_deref() == p.protect_batch)
+                    || (p.protect_batch.is_some() && batch.as_deref() == p.protect_batch)
                     || p.only.is_some_and(|seen| {
                         let name = crate::util::os_from_str(&e.name);
                         !seen.get(ri).is_some_and(|s| s.saw_item(&name))
                     }),
                 identity: trashdir::payload_id(&payload),
                 name: e.name,
+                original,
+                batch,
             }
         }));
         sizes.write_back_locked();
@@ -186,6 +200,20 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
         let c = &items[i];
         let dir = &dirs[c.root];
         let shown = crate::util::join_name(&dir.files(), &c.name);
+        if !p.dry_run {
+            let live = list::confirmed_named(dir, &c.name);
+            let same = live.is_some_and(|e| {
+                e.original == c.original && e.epoch == c.epoch && e.batch == c.batch
+            });
+            if !same {
+                eprintln!(
+                    "{prog}: '{}' changed in the trash after it was read; left as it is",
+                    crate::util::err_path(&shown)
+                );
+                out.errors += 1;
+                continue;
+            }
+        }
         if p.dry_run {
             p.human.line(&format!(
                 "would remove {} ({})",
@@ -193,7 +221,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                 format_bytes(c.bytes)
             ));
         } else {
-            if let Err(e) = remove_entry(dir, &c.name, c.identity) {
+            if let Err(e) = remove_entry(dir, c) {
                 eprintln!(
                     "{prog}: cannot remove '{}': {e}",
                     crate::util::err_path(&shown)
@@ -255,13 +283,20 @@ fn tree_inodes(path: &std::path::Path) -> u64 {
     n
 }
 
-fn remove_entry(
-    dir: &TrashDir,
-    name: &str,
-    identity: Option<trashdir::PayloadId>,
-) -> io::Result<()> {
-    let payload = crate::util::join_name(&dir.files(), name);
-    if trashdir::payload_id(&payload) != identity {
+fn remove_entry(dir: &TrashDir, c: &Candidate) -> io::Result<()> {
+    crate::catalog_cache::invalidate(dir);
+    // prune already holds this trash's lock. Entry::relock would take it
+    // again. This is the record read relock makes, and the payload
+    // identity it would compare.
+    let live = crate::list::confirmed_named(dir, &c.name)
+        .ok_or_else(|| io::Error::other("item changed after it was selected; left as it is"))?;
+    if live.original != c.original || live.epoch != c.epoch || live.batch != c.batch {
+        return Err(io::Error::other(
+            "item changed after it was selected; left as it is",
+        ));
+    }
+    let payload = crate::util::join_name(&dir.files(), &c.name);
+    if trashdir::payload_id(&payload) != c.identity {
         return Err(io::Error::other(
             "item changed after it was selected; left as it is",
         ));
@@ -269,7 +304,7 @@ fn remove_entry(
     crate::permanent_guard::remove(&payload)?;
     // The payload is gone: its record goes too before a Ctrl-C acts.
     let _section = crate::interrupt::critical();
-    match fs::remove_file(crate::util::join_info(&dir.info(), name)) {
+    match fs::remove_file(crate::util::join_info(&dir.info(), &c.name)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -288,6 +323,8 @@ mod tests {
             inodes: 0,
             protected: false,
             identity: None,
+            original: std::path::PathBuf::new(),
+            batch: None,
         }
     }
 

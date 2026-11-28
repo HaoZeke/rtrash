@@ -11,6 +11,11 @@ PATTERN keeps items whose file name holds it, or matches it when it has
 a glob character (* ? [), like --glob.
 Payloads with no .trashinfo come last, dated ????-??-??, under their path
 in the trash (\"orphan\":true in JSON); an age filter leaves them out.
+An unchanged trash is listed from a sealed catalog of its records.
+A change by another tool is read again. RTRASH_NO_CACHE set to 1, true
+or yes, in any case, reads every record and does not delete the catalog.
+Any other value leaves the catalog on. The Finder list and the Recycle
+Bin never use it.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  list only this trash directory (repeatable);
@@ -233,6 +238,52 @@ pub fn entry_named(dir: &TrashDir, name: &str) -> Option<Entry> {
     read_entry(dir, &record, name, Pathless::Keep).ok()
 }
 
+/// `entry` read again from its record. `None` when the name is not a trash
+/// item, or the record is missing or cannot be read. A deletion uses this,
+/// not the body a catalog or an earlier scan returned: those can still name
+/// the path, date or batch the record had in an earlier coarse tick.
+pub(crate) fn confirmed(entry: &Entry) -> Option<Entry> {
+    if !entry.recorded {
+        return None;
+    }
+    confirmed_named(&entry.dir, &entry.name)
+}
+
+/// [`confirmed`] for a trash item named `name`.
+pub(crate) fn confirmed_named(dir: &TrashDir, name: &str) -> Option<Entry> {
+    let fname = format!("{name}.trashinfo");
+    crate::util::trash_item_name(&fname)?;
+    entry_named(dir, name)
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_COLLECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` once, on this thread, after the next collect that a deletion
+/// re-reads. The collect's entries stay as they were; the records on disk
+/// may not.
+#[cfg(test)]
+pub(crate) fn on_after_collect(f: Box<dyn FnOnce()>) {
+    AFTER_COLLECT.with(|h| *h.borrow_mut() = Some(f));
+}
+
+/// Take the hook [`on_after_collect`] stored, if a test set one.
+#[cfg(test)]
+pub(crate) fn fire_after_collect() {
+    if let Some(f) = AFTER_COLLECT.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+/// Drop a hook [`on_after_collect`] stored, without running it.
+#[cfg(test)]
+pub(crate) fn clear_after_collect() {
+    AFTER_COLLECT.with(|h| *h.borrow_mut() = None);
+}
+
 /// Every item the records in `dirs` name, oldest first. A record that
 /// cannot be read, or whose relative `Path=` climbs out of its volume, is
 /// left out; one with no `Path=` stays, with an empty original (or the
@@ -283,42 +334,54 @@ enum Pathless {
 }
 
 fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> Listing {
-    use rayon::prelude::*;
     let mut out = Vec::new();
     let mut left = Vec::new();
     let mut strays = Vec::with_capacity(dirs.len());
     for dir in dirs {
+        let (saved, before) = crate::catalog_cache::load_or_stamp(dir);
+        if let Some(saved) = saved {
+            apply_saved(dir, pathless, saved, &mut out, &mut left, &mut strays);
+            continue;
+        }
+        crate::catalog_cache::note_scan();
         let Ok(entries) = fs::read_dir(dir.info()) else {
             strays.push(0);
             continue;
         };
         let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        let records = |p: &PathBuf| {
+        let is_record = |p: &PathBuf| {
             p.file_name().is_some_and(|f| {
                 crate::util::trash_item_name(&crate::util::str_from_os_ref(f)).is_some()
             })
         };
-        strays.push(paths.iter().filter(|p| !records(p)).count() as u64);
+        let stray = paths.iter().filter(|p| !is_record(p)).count() as u64;
+        strays.push(stray);
         // One read per item: spread a big trash over the rayon pool. A
         // name that is not a record gives None.
-        let read: Vec<Result<Entry, Unlisted>> = paths
-            .into_par_iter()
-            .filter_map(|path| {
-                let fname = crate::util::str_from_os_ref(path.file_name()?);
-                let name = crate::util::trash_item_name(&fname)?;
-                Some(
-                    read_entry(dir, &path, name, pathless).map_err(|trash_cli| Unlisted {
-                        record: path.clone(),
-                        root: dir.root.clone(),
-                        trash_cli,
-                    }),
-                )
-            })
-            .collect();
-        for r in read {
-            match r {
+        let read = read_records(dir, pathless, &paths);
+        let mut saved = Vec::new();
+        let mut cacheable = true;
+        for row in read {
+            if let Some(rec) = row.saved {
+                saved.push(rec);
+            } else {
+                cacheable = false;
+            }
+            match row.result {
                 Ok(e) => out.push(e),
                 Err(u) => left.push(u),
+            }
+        }
+        if cacheable {
+            if let Some(before) = before {
+                crate::catalog_cache::store_if_unchanged(
+                    dir,
+                    &before,
+                    &crate::catalog_cache::Saved {
+                        records: saved,
+                        strays: stray,
+                    },
+                );
             }
         }
     }
@@ -335,6 +398,99 @@ fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> Listing {
     }
 }
 
+struct ReadRow {
+    result: Result<Entry, Unlisted>,
+    /// `None` when this record must not be stored: it could not be read,
+    /// or it is a symlink (its target can change without the link's own
+    /// stamp moving in a way we refuse to guess).
+    saved: Option<crate::catalog_cache::Record>,
+}
+
+fn read_records(dir: &TrashDir, pathless: Pathless, paths: &[PathBuf]) -> Vec<ReadRow> {
+    use rayon::prelude::*;
+    paths
+        .par_iter()
+        .filter_map(|path| {
+            let fname = crate::util::str_from_os_ref(path.file_name()?);
+            let name = crate::util::trash_item_name(&fname)?.to_string();
+            let file_name = {
+                use std::os::unix::ffi::OsStrExt;
+                path.file_name()?.as_bytes().to_vec()
+            };
+            Some(read_row(dir, path, name, file_name, pathless))
+        })
+        .collect()
+}
+
+fn read_row(
+    dir: &TrashDir,
+    path: &std::path::Path,
+    name: String,
+    file_name: Vec<u8>,
+    pathless: Pathless,
+) -> ReadRow {
+    let link = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let body = match info::read_bounded(path, info::RECORD_CAP) {
+        Ok(body) => body,
+        Err(e) => {
+            return ReadRow {
+                result: Err(Unlisted {
+                    record: path.to_path_buf(),
+                    root: dir.root.clone(),
+                    trash_cli: trash_cli_read_line(&e, path),
+                }),
+                saved: None,
+            };
+        }
+    };
+    let saved = (!link).then(|| crate::catalog_cache::Record {
+        name: name.clone(),
+        file_name,
+        body: body.clone(),
+    });
+    let result =
+        entry_from_content(dir, path, &name, pathless, &body).map_err(|trash_cli| Unlisted {
+            record: path.to_path_buf(),
+            root: dir.root.clone(),
+            trash_cli,
+        });
+    ReadRow { result, saved }
+}
+
+fn apply_saved(
+    dir: &TrashDir,
+    pathless: Pathless,
+    saved: crate::catalog_cache::Saved,
+    out: &mut Vec<Entry>,
+    left: &mut Vec<Unlisted>,
+    strays: &mut Vec<u64>,
+) {
+    use std::os::unix::ffi::OsStrExt;
+    for rec in saved.records {
+        let path = dir.info().join(std::ffi::OsStr::from_bytes(&rec.file_name));
+        // The item name is the hashed record's file name. The string
+        // stored beside the body is not a key: a same-user edit can
+        // change it and recompute the checksum.
+        let Some(name) = crate::catalog_cache::item_name(&rec.file_name) else {
+            left.push(Unlisted {
+                record: path,
+                root: dir.root.clone(),
+                trash_cli: None,
+            });
+            continue;
+        };
+        match entry_from_content(dir, &path, name, pathless, &rec.body) {
+            Ok(e) => out.push(e),
+            Err(trash_cli) => left.push(Unlisted {
+                record: path,
+                root: dir.root.clone(),
+                trash_cli,
+            }),
+        }
+    }
+    strays.push(saved.strays);
+}
+
 /// The entry the record at `path` (for the payload `name`) gives. It is
 /// an error when the record cannot be read, its `Path=` does not resolve
 /// in `dir`, or it has none and `pathless` says to skip it (as `status
@@ -348,7 +504,18 @@ fn read_entry(
 ) -> Result<Entry, Option<String>> {
     let content =
         info::read_bounded(path, info::RECORD_CAP).map_err(|e| trash_cli_read_line(&e, path))?;
-    let parsed = info::parse_bytes(&content);
+    entry_from_content(dir, path, name, pathless, &content)
+}
+
+/// The entry `content` gives, the same way a read of `path` would.
+fn entry_from_content(
+    dir: &TrashDir,
+    path: &std::path::Path,
+    name: &str,
+    pathless: Pathless,
+    content: &[u8],
+) -> Result<Entry, Option<String>> {
+    let parsed = info::parse_bytes(content);
     if pathless == Pathless::Skip && parsed.path.as_os_str().is_empty() {
         // trash-cli takes the first line that starts with `Path=`, even an
         // empty one, and fails only when there is none.

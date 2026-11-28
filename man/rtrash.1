@@ -772,6 +772,30 @@ would be
 itself or the whole trash; no command lists it or acts on it, and a full
 .B empty
 clears it.
+.PP
+List, status, undo, trash-stats, retention and the Python
+.B list_trash
+binding reuse a sealed catalog of the records
+(see
+.I $XDG_CACHE_HOME/rtrash
+under
+.BR FILES )
+when those records still match it.
+Put, restore, rm and empty remove the catalog.
+A change another tool makes does not: the catalog is ignored and the
+records are read.
+Empty, a size budget and the check before an unscoped empty read each
+record again before they delete.
+.B RTRASH_NO_CACHE
+set to
+.B 1
+(or
+.B true
+or
+.BR yes ,
+any case) reads every record and does not delete the catalog. Any other
+value leaves the catalog on.
+The macOS Finder list and the Windows Recycle Bin never use the catalog.
 .TP
 .B \-\-home\-only
 Only the home trash
@@ -1059,6 +1083,7 @@ An age filter leaves them out.
 Summarize discovered trash: item count and approximate reclaimable size
 (per root and total). Uses the same disk-usage walk as
 .BR "empty \-\-dry\-run" .
+It reads the sealed catalog when the records still match.
 A line for each trash then gives the free bytes and free inodes of its
 file system, and a warning goes to stderr when either is under 10%.
 The JSON roots carry them as
@@ -1335,6 +1360,7 @@ Sizes come from the same walk and
 .I directorysizes
 cache as
 .BR status .
+It reads the sealed catalog when the records still match.
 On Windows there is one summary per drive's Recycle Bin
 .RI ( X:\e$Recycle.Bin ),
 an item's size is the one its
@@ -3298,6 +3324,7 @@ Output version information and exit.
 [\fIOPTION\fR]... [\fIBATCH\fR]
 .PP
 Restore every item one put run trashed, each to its original location.
+It reads the sealed catalog when the records still match.
 Each put run writes one batch id into its
 .B .trashinfo
 files, under the extra key
@@ -4844,6 +4871,25 @@ The key bindings file to read instead of
 (see
 .BR keys ).
 .TP
+.B RTRASH_NO_CACHE
+.B 1
+(or
+.B true
+or
+.BR yes ,
+any case): list, status, undo, trash-stats, retention and the Python
+.B list_trash
+binding read every
+.I .trashinfo
+instead of the sealed catalog under
+.IR $XDG_CACHE_HOME/rtrash .
+That skips the catalog and does not delete it.
+Put, restore, rm and empty still remove the catalog.
+Any other value leaves
+the catalog on.
+Unset, a catalog that still matches the trash is used.
+The macOS Finder list and the Windows Recycle Bin never use the catalog.
+.TP
 .B RTRASH_MAX_SIZE
 When set to a size such as 10G, each put afterwards prunes every trash
 directory it used back under that size, removing older items first.
@@ -5198,6 +5244,34 @@ does.
 and
 .B "empty \-\-dry\-run"
 write walked sizes back.
+.TP
+.I $XDG_CACHE_HOME/rtrash/c\-*.bin
+Sealed catalog of one trash's records. List, status, undo,
+trash-stats, retention and the Python
+.B list_trash
+binding reuse it when
+the records still match and their modification times are older than
+the catalog by more than twice the coarse clock's tick, and at least
+20 ms.
+The file is mode 0600. Load uses it only when its owner is this user,
+group and other have no permission on it, and it is not a symlink.
+Put, restore, rm and empty remove the catalog, including when
+.B RTRASH_NO_CACHE
+is set.
+That variable, set to
+.BR 1 ,
+.B true
+or
+.BR yes ,
+makes a reader skip the catalog and does not delete it.
+The macOS Finder list and the Windows Recycle Bin never use it.
+A catalog whose checksum fails, whose stamp no longer matches, or
+whose item names do not match the record file names, is ignored
+and the records are read.
+When
+.B XDG_CACHE_HOME
+is unset the directory is
+.IR $HOME/.cache/rtrash .
 .TP
 .I $XDG_CONFIG_HOME/rtrash/config.toml
 Config file (see
